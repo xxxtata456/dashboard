@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>得力 DELICACY | 訂單帳本</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;700;900&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --ink:#e9e3d5;
+    --ink-dim:#a89e8c;
+    --bg:#14181c;
+    --surface:#1b2126;
+    --surface-2:#20272d;
+    --line:#333c42;
+    --seal:#b23a2e;
+    --seal-dim:#7a2822;
+    --brass:#a8823d;
+    --jade:#5c8a6b;
+    --radius:2px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'Noto Sans TC', sans-serif;
+    min-height:100vh;
+    background-image:
+      radial-gradient(circle at 15% 8%, rgba(178,58,46,0.06), transparent 40%),
+      radial-gradient(circle at 85% 92%, rgba(168,130,61,0.05), transparent 45%);
+  }
+  .mono{ font-family:'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
+  .serif{ font-family:'Noto Serif TC', serif; }
+
+  /* ---------- 登入畫面 ---------- */
+  #gate{
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    padding:32px;
+    text-align:center;
+    gap:28px;
+  }
+  #gate .mark{
+    width:64px; height:64px;
+    border:2px solid var(--seal);
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    color:var(--seal);
+    font-size:26px; font-weight:900;
+    font-family:'Noto Serif TC', serif;
+    transform:rotate(-8deg);
+    opacity:0.9;
+  }
+  #gate h1{
+    font-family:'Noto Serif TC', serif;
+    font-size:28px;
+    font-weight:700;
+    letter-spacing:0.04em;
+  }
+  #gate p{ color:var(--ink-dim); font-size:14px; max-width:320px; line-height:1.7; }
+  #loginBtn{
+    background:var(--seal);
+    color:#f4ede0;
+    border:none;
+    padding:14px 32px;
+    font-family:'Noto Sans TC', sans-serif;
+    font-size:15px;
+    font-weight:700;
+    letter-spacing:0.05em;
+    border-radius:var(--radius);
+    cursor:pointer;
+    transition:background 0.2s;
+  }
+  #loginBtn:hover{ background:#c94636; }
+  #loginBtn:focus-visible{ outline:2px solid var(--brass); outline-offset:3px; }
+  #gateStatus{ font-size:13px; color:var(--ink-dim); min-height:18px; }
+
+  /* ---------- 儀表板 ---------- */
+  #dash{ display:none; max-width:920px; margin:0 auto; padding:20px 16px 64px; }
+  header.top{
+    display:flex; align-items:flex-start; justify-content:space-between;
+    padding:20px 4px 24px;
+    border-bottom:1px solid var(--line);
+    margin-bottom:28px;
+  }
+  header.top .brand-cn{ font-family:'Noto Serif TC',serif; font-size:22px; font-weight:700; }
+  header.top .brand-vn{ font-size:11px; color:var(--ink-dim); letter-spacing:0.12em; margin-top:2px; }
+  header.top .updated{ font-size:11px; color:var(--ink-dim); text-align:right; }
+  header.top .updated .dot{ color:var(--jade); }
+
+  /* Hero numbers */
+  .hero{
+    display:grid;
+    grid-template-columns:1.3fr 1fr;
+    gap:14px;
+    margin-bottom:28px;
+  }
+  @media (max-width:560px){ .hero{ grid-template-columns:1fr; } }
+  .hero-card{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:24px 22px;
+    position:relative;
+    overflow:hidden;
+  }
+  .hero-card.primary{ border-left:3px solid var(--seal); }
+  .hero-card.secondary{ border-left:3px solid var(--brass); }
+  .hero-label{ font-size:12px; color:var(--ink-dim); letter-spacing:0.08em; margin-bottom:10px; }
+  .hero-number{ font-family:'IBM Plex Mono', monospace; font-size:36px; font-weight:600; letter-spacing:-0.01em; }
+  .hero-number small{ font-size:16px; color:var(--ink-dim); margin-left:4px; font-weight:400;}
+  .hero-sub{ font-size:12px; color:var(--ink-dim); margin-top:8px; }
+
+  /* 印章 status chip */
+  .chop{
+    display:inline-flex; align-items:center; gap:5px;
+    border:1.5px solid var(--seal);
+    color:var(--seal);
+    font-size:11px;
+    font-weight:700;
+    padding:2px 9px;
+    border-radius:3px;
+    transform:rotate(-3deg);
+    letter-spacing:0.05em;
+    white-space:nowrap;
+  }
+  .chop.done{ border-color:var(--jade); color:var(--jade); transform:rotate(2deg); }
+
+  /* Section */
+  .section-title{
+    display:flex; align-items:baseline; gap:10px;
+    margin:32px 0 14px;
+  }
+  .section-title .num{ font-family:'IBM Plex Mono',monospace; color:var(--brass); font-size:13px; }
+  .section-title h2{ font-family:'Noto Serif TC',serif; font-size:17px; font-weight:700; }
+  .section-title .count{ color:var(--ink-dim); font-size:12px; margin-left:auto; }
+
+  /* 待出貨 ledger rows */
+  .ledger{ border-top:1px solid var(--line); }
+  .ledger-row{
+    display:grid;
+    grid-template-columns:1fr auto auto auto;
+    gap:14px;
+    align-items:center;
+    padding:14px 4px;
+    border-bottom:1px dashed var(--line);
+  }
+  @media (max-width:560px){
+    .ledger-row{ grid-template-columns:1fr; gap:6px; }
+    .ledger-row .r-qty, .ledger-row .r-code{ font-size:12px; }
+  }
+  .ledger-row .r-name{ font-size:14px; }
+  .ledger-row .r-code{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-dim); }
+  .ledger-row .r-qty{ font-family:'IBM Plex Mono',monospace; font-size:14px; text-align:right; color:var(--seal); font-weight:600; }
+  .ledger-row .r-date{ font-size:11px; color:var(--ink-dim); text-align:right; }
+
+  .empty{ padding:28px 4px; color:var(--ink-dim); font-size:13px; text-align:center; }
+
+  /* footer / reload */
+  .foot{ margin-top:40px; display:flex; justify-content:center; }
+  .reload{
+    background:transparent; border:1px solid var(--line); color:var(--ink-dim);
+    padding:9px 18px; font-size:12px; border-radius:var(--radius); cursor:pointer;
+  }
+  .reload:hover{ border-color:var(--brass); color:var(--brass); }
+
+  #errBox{
+    display:none;
+    background:var(--surface-2); border:1px solid var(--seal-dim);
+    color:var(--ink); padding:16px; border-radius:var(--radius);
+    font-size:13px; line-height:1.7; margin-bottom:20px; white-space:pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<!-- 登入畫面 -->
+<div id="gate">
+  <div class="mark">力</div>
+  <h1>得力 DELICACY<br>訂單帳本</h1>
+  <p>用你獲授權的 Google 帳號登入，即可查看即時業績與出貨狀態。資料僅顯示於你的畫面，不會外流。</p>
+  <button id="loginBtn">用 Google 帳號登入查看</button>
+  <div id="gateStatus"></div>
+</div>
+
+<!-- 儀表板 -->
+<div id="dash">
+  <header class="top">
+    <div>
+      <div class="brand-cn">得力 DELICACY</div>
+      <div class="brand-vn">ĐƠN HÀNG DELICACY · 訂單帳本</div>
+    </div>
+    <div class="updated"><span class="dot">●</span> 已同步最新資料</div>
+  </header>
+
+  <div id="errBox"></div>
+
+  <div class="hero">
+    <div class="hero-card primary">
+      <div class="hero-label">累計訂單金額</div>
+      <div class="hero-number mono" id="totalRevenue">—</div>
+      <div class="hero-sub" id="orderCountSub">—</div>
+    </div>
+    <div class="hero-card secondary">
+      <div class="hero-label">尚待出貨品項</div>
+      <div class="hero-number mono" id="pendingCount">—</div>
+      <div class="hero-sub" id="pendingQtySub">—</div>
+    </div>
+  </div>
+
+  <div class="section-title">
+    <span class="num">01</span>
+    <h2>待出貨清單</h2>
+    <span class="count" id="pendingListCount"></span>
+  </div>
+  <div class="ledger" id="pendingList">
+    <div class="empty">讀取中…</div>
+  </div>
+
+  <div class="section-title">
+    <span class="num">02</span>
+    <h2>近期訂單</h2>
+    <span class="count" id="recentListCount"></span>
+  </div>
+  <div class="ledger" id="recentList">
+    <div class="empty">讀取中…</div>
+  </div>
+
+  <div class="foot">
+    <button class="reload" id="reloadBtn">重新整理資料</button>
+  </div>
+</div>
+
+<script>
+/* ====== 設定區 ====== */
+const CLIENT_ID = "171109965782-ngcl41juffgr1nrc4csjfk8n050bt11g.apps.googleusercontent.com";
+const SCOPES = "https://www.googleapis.com/auth/drive.readonly";
+const FILE_NAME_QUERY = "DELICACY"; // 用來搜尋檔案名稱關鍵字
+const SHEET_NAME_HINT = "訂單追蹤表"; // 優先找這個分頁名稱
+
+let tokenClient;
+let accessToken = null;
+
+function showError(msg){
+  const box = document.getElementById('errBox');
+  box.style.display = 'block';
+  box.textContent = msg;
+}
+
+window.onload = () => {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    callback: (resp) => {
+      if (resp.error) {
+        document.getElementById('gateStatus').textContent = '登入失敗，請再試一次。';
+        return;
+      }
+      accessToken = resp.access_token;
+      document.getElementById('gate').style.display = 'none';
+      document.getElementById('dash').style.display = 'block';
+      loadData();
+    }
+  });
+
+  document.getElementById('loginBtn').addEventListener('click', () => {
+    document.getElementById('gateStatus').textContent = '正在開啟 Google 登入…';
+    tokenClient.requestAccessToken();
+  });
+
+  document.getElementById('reloadBtn').addEventListener('click', () => {
+    loadData();
+  });
+};
+
+async function loadData(){
+  document.getElementById('errBox').style.display = 'none';
+  try{
+    const fileId = await findFile();
+    const buf = await downloadFile(fileId);
+    const workbook = XLSX.read(buf, {type:'array'});
+    const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
+    const parsed = parseLedger(rows);
+    render(parsed);
+  } catch(err){
+    console.error(err);
+    showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + FILE_NAME_QUERY + '」，且你的 Google 帳號有檢視權限。');
+  }
+}
+
+async function findFile(){
+  const q = encodeURIComponent(`name contains '${FILE_NAME_QUERY}' and trashed = false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=10`;
+  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
+  if(!res.ok) throw new Error('搜尋檔案失敗 (HTTP ' + res.status + ')');
+  const data = await res.json();
+  if(!data.files || data.files.length === 0) throw new Error('找不到名稱包含「' + FILE_NAME_QUERY + '」的檔案');
+  // 取最近修改的那個
+  data.files.sort((a,b) => new Date(b.modifiedTime) - new Date(a.modifiedTime));
+  return data.files[0].id;
+}
+
+async function downloadFile(fileId){
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
+  if(!res.ok) throw new Error('下載檔案失敗 (HTTP ' + res.status + ')');
+  return await res.arrayBuffer();
+}
+
+/* 解析帳本：自動找標題列，再依關鍵字比對欄位 */
+function parseLedger(rows){
+  let headerRowIdx = -1;
+  let headerRow = null;
+  for(let i=0;i<Math.min(rows.length, 15);i++){
+    const row = rows[i].map(c => String(c));
+    if(row.some(c => c.includes('訂單號碼') || c.includes('代碼'))){
+      headerRowIdx = i;
+      headerRow = row;
+      break;
+    }
+  }
+  if(headerRowIdx === -1) throw new Error('找不到表格標題列，可能表格結構有變動');
+
+  const findCol = (keywords) => {
+    for(let i=0;i<headerRow.length;i++){
+      const cell = headerRow[i];
+      if(keywords.some(k => cell.includes(k))) return i;
+    }
+    return -1;
+  };
+
+  const colDate   = findCol(['訂單日期','NN']);
+  const colCode   = findCol(['代碼']);
+  const colName   = findCol(['Tên hàng','品名']);
+  const colPrice  = findCol(['GIA','單價']);
+  const colQty    = findCol(['SLĐ','訂數量']);
+  const colOwed   = findCol(['nợ','還欠']);
+
+  const items = [];
+  for(let i=headerRowIdx+1;i<rows.length;i++){
+    const row = rows[i];
+    const code = colCode>=0 ? String(row[colCode]||'').trim() : '';
+    const name = colName>=0 ? String(row[colName]||'').trim() : '';
+    if(!code && !name) continue;
+    const price = colPrice>=0 ? parseFloat(String(row[colPrice]).replace(/,/g,'')) || 0 : 0;
+    const qty   = colQty>=0 ? parseFloat(String(row[colQty]).replace(/,/g,'')) || 0 : 0;
+    const owed  = colOwed>=0 ? parseFloat(String(row[colOwed]).replace(/,/g,'')) || 0 : 0;
+    const date  = colDate>=0 ? String(row[colDate]||'').trim() : '';
+    items.push({ code, name, price, qty, owed, date, amount: price*qty });
+  }
+  return items;
+}
+
+function fmtInt(n){ return Math.round(n).toLocaleString('zh-Hant'); }
+
+function render(items){
+  const totalRevenue = items.reduce((s,i)=>s+i.amount,0);
+  const orderCount = items.length;
+  const pending = items.filter(i => i.owed > 0);
+  const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
+
+  document.getElementById('totalRevenue').innerHTML = fmtInt(totalRevenue) + '<small>đ</small>';
+  document.getElementById('orderCountSub').textContent = `共 ${orderCount} 筆訂單品項`;
+  document.getElementById('pendingCount').textContent = pending.length;
+  document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 單位`;
+
+  const pendingListEl = document.getElementById('pendingList');
+  document.getElementById('pendingListCount').textContent = pending.length + ' 筆';
+  if(pending.length === 0){
+    pendingListEl.innerHTML = '<div class="empty">目前沒有待出貨品項</div>';
+  } else {
+    pendingListEl.innerHTML = pending
+      .sort((a,b)=>b.owed-a.owed)
+      .map(i => `
+        <div class="ledger-row">
+          <div>
+            <div class="r-name">${escapeHtml(i.name || i.code)}</div>
+            <div class="r-code">${escapeHtml(i.code)}</div>
+          </div>
+          <div class="r-qty">還欠 ${fmtInt(i.owed)}</div>
+          <div class="chop">待出貨</div>
+          <div class="r-date">${escapeHtml(i.date)}</div>
+        </div>
+      `).join('');
+  }
+
+  const recentListEl = document.getElementById('recentList');
+  const recent = items.slice(-15).reverse();
+  document.getElementById('recentListCount').textContent = `最近 ${recent.length} 筆`;
+  if(recent.length === 0){
+    recentListEl.innerHTML = '<div class="empty">尚無訂單資料</div>';
+  } else {
+    recentListEl.innerHTML = recent.map(i => `
+      <div class="ledger-row">
+        <div>
+          <div class="r-name">${escapeHtml(i.name || i.code)}</div>
+          <div class="r-code">${escapeHtml(i.code)}</div>
+        </div>
+        <div class="r-qty">${fmtInt(i.amount)} đ</div>
+        <div class="chop ${i.owed>0 ? '' : 'done'}">${i.owed>0 ? '待出貨' : '已結清'}</div>
+        <div class="r-date">${escapeHtml(i.date)}</div>
+      </div>
+    `).join('');
+  }
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
+
