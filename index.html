@@ -311,7 +311,16 @@ async function findFile(){
 async function downloadFile(fileId){
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
   const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
-  if(!res.ok) throw new Error('下載檔案失敗 (HTTP ' + res.status + ')');
+  if(!res.ok){
+    let detail = '';
+    try{
+      const errJson = await res.json();
+      detail = errJson.error ? (errJson.error.message || JSON.stringify(errJson.error)) : JSON.stringify(errJson);
+    }catch(e){
+      try{ detail = await res.text(); }catch(e2){ detail = '(無法讀取錯誤內容)'; }
+    }
+    throw new Error(`下載檔案失敗 (HTTP ${res.status})\n詳細原因：${detail}`);
+  }
   return await res.arrayBuffer();
 }
 
