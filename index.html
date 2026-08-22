@@ -364,7 +364,7 @@ async function loadData(){
   try{
     const fileId = await findFile();
     const buf = await downloadFile(fileId);
-    const workbook = XLSX.read(buf, {type:'array'});
+    const workbook = XLSX.read(buf, {type:'array', cellDates:true});
     const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
@@ -442,26 +442,31 @@ function parseLedger(rows){
     const price = colPrice>=0 ? parseFloat(String(row[colPrice]).replace(/,/g,'')) || 0 : 0;
     const qty   = colQty>=0 ? parseFloat(String(row[colQty]).replace(/,/g,'')) || 0 : 0;
     const owed  = colOwed>=0 ? parseFloat(String(row[colOwed]).replace(/,/g,'')) || 0 : 0;
-    const date  = colDate>=0 ? String(row[colDate]||'').trim() : '';
-    const monthKey = parseVNDate(date);
-    const dateObj = parseVNDateObj(date);
+    // 過濾雜訊列：代碼／品名純數字（多半是誤讀到合計列或日期欄位），且沒有任何實際訂單金額
+    const looksLikeJunk = /^[\d.,]+$/.test(code) && /^[\d.,]+$/.test(name || '0');
+    if(looksLikeJunk && price === 0 && qty === 0 && owed === 0) continue;
+    if(price === 0 && qty === 0 && owed === 0 && !name) continue;
+    const rawDate = colDate>=0 ? row[colDate] : '';
+    const dateObj = toDateObj(rawDate);
+    const monthKey = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}` : null;
+    const date = dateObj ? fmtDateShort(dateObj) : String(rawDate||'').trim();
     items.push({ code, name, price, qty, owed, date, monthKey, dateObj, amount: price*qty });
   }
   return items;
 }
 
-/* 解析 dd/mm/yyyy 或 dd-mm-yyyy 格式的日期，回傳 "YYYY-MM" 或 null */
-function parseVNDate(str){
-  const m = String(str).match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
-  if(!m) return null;
-  const day = parseInt(m[1],10), mon = parseInt(m[2],10), yr = parseInt(m[3],10);
-  if(mon < 1 || mon > 12) return null;
-  return `${yr}-${String(mon).padStart(2,'0')}`;
-}
-
-/* 同上，但回傳真正的 Date 物件，供移動天數區間計算使用 */
-function parseVNDateObj(str){
-  const m = String(str).match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
+/* 將儲存格原始值（可能是 Date 物件／Excel 序號／文字字串）統一轉成 Date 物件，失敗回傳 null */
+function toDateObj(raw){
+  if(!raw && raw !== 0) return null;
+  if(raw instanceof Date && !isNaN(raw)) return raw;
+  if(typeof raw === 'number'){
+    // Excel 序號日期（1900 曆制），轉換為 JS Date
+    const ms = Math.round((raw - 25569) * 86400 * 1000);
+    const d = new Date(ms);
+    return isNaN(d) ? null : d;
+  }
+  const str = String(raw).trim();
+  const m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
   if(!m) return null;
   const day = parseInt(m[1],10), mon = parseInt(m[2],10), yr = parseInt(m[3],10);
   if(mon < 1 || mon > 12 || day < 1 || day > 31) return null;
