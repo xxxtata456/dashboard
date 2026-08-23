@@ -217,7 +217,7 @@
   /* 產品備貨分析 */
   .stock-row{
     display:grid;
-    grid-template-columns:1fr auto auto auto;
+    grid-template-columns:1fr auto auto auto auto;
     gap:14px;
     align-items:center;
     padding:13px 4px;
@@ -266,6 +266,23 @@
     margin-top:6px;
   }
   .category-header:first-child{ margin-top:0; }
+
+  .watchlist-block{
+    background:var(--surface); border:1px solid var(--seal-dim); border-left:3px solid var(--seal);
+    border-radius:2px; padding:4px 14px; margin-bottom:24px;
+  }
+  .watchlist-title{
+    font-family:'Noto Serif TC',serif; font-size:14px; font-weight:700; color:var(--seal);
+    padding:12px 0 4px;
+  }
+  .watch-row{
+    display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center;
+    padding:10px 0; border-bottom:1px dashed var(--line);
+  }
+  .watch-row:last-child{ border-bottom:none; }
+  .watch-row .w-name{ font-size:13px; }
+  .watch-row .w-code{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-dim); }
+  .watch-row .w-tag{ font-size:11px; font-weight:700; color:var(--seal); white-space:nowrap; }
 
   /* footer / reload */
   .foot{ margin-top:40px; display:flex; justify-content:center; }
@@ -338,7 +355,7 @@
 
   <div class="main-tabs">
     <button class="main-tab active" id="mainTabRevenue" onclick="switchMainTab('revenue')">業績金額</button>
-    <button class="main-tab" id="mainTabQty" onclick="switchMainTab('qty')">訂單產品數量</button>
+    <button class="main-tab" id="mainTabQty" onclick="switchMainTab('qty')">產品分析</button>
   </div>
 
   <!-- ===== 業績金額分頁 ===== -->
@@ -380,6 +397,7 @@
       <h2>產品備貨分析</h2>
       <span class="count" id="stockListCount"></span>
     </div>
+    <div id="watchlistBlock"></div>
     <div class="ledger" id="stockList">
       <div class="empty">讀取中…</div>
     </div>
@@ -523,7 +541,8 @@ function parseLedger(rows){
     const dateObj = toDateObj(rawDate);
     const monthKey = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}` : null;
     const date = dateObj ? fmtDateShort(dateObj) : String(rawDate||'').trim();
-    items.push({ code, name, price, qty, owed, date, monthKey, dateObj, amount: price*qty });
+    const priceMissing = qty > 0 && price === 0;
+    items.push({ code, name, price, qty, owed, date, monthKey, dateObj, amount: price*qty, priceMissing });
   }
   return items;
 }
@@ -681,7 +700,7 @@ function render(items){
   withDate.forEach(i => {
     const key = i.code || i.name;
     if(!key) return;
-    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0 };
+    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0, latestPrice:0, latestPriceDate:null };
     productMap[key].totalQty += i.qty;
     productMap[key].owed += i.owed;
     productMap[key].months.add(i.monthKey);
@@ -689,7 +708,13 @@ function render(items){
     const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) productMap[key].recent7Qty += i.qty;
     if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) productMap[key].recent30Qty += i.qty;
+    // 追蹤該產品「最新一筆有填單價」的訂單，作為目前單價參考
+    if(i.price > 0 && (!productMap[key].latestPriceDate || i.dateObj > productMap[key].latestPriceDate)){
+      productMap[key].latestPrice = i.price;
+      productMap[key].latestPriceDate = i.dateObj;
+    }
   });
+
 
   const CATEGORY_ORDER = ['分散','酸性','反應','鹽基','HeiQ','助劑'];
   const DYE_CATEGORIES = ['分散','酸性','反應','鹽基']; // 這幾類要再依染料顏色細分排序
@@ -705,34 +730,81 @@ function render(items){
 
   // 顏色偵測順序（NAVY 要排在 BLUE 前面比對，避免 "NAVY BLUE" 被誤判成藍）；sortIndex 決定顯示順序：黃橘紅藍丈青紫黑
   const COLOR_DEFS = [
-    { key:'YELLOW', sortIndex:0 },
-    { key:'ORANGE', sortIndex:1 },
-    { key:'RED',    sortIndex:2 },
-    { key:'NAVY',   sortIndex:4 },
-    { key:'BLUE',   sortIndex:3 },
-    { key:'PURPLE', sortIndex:5 },
-    { key:'VIOLET', sortIndex:5 },
-    { key:'BLACK',  sortIndex:6 },
+    { key:'YELLOW',   sortIndex:0, subIndex:0 },
+    { key:'ORANGE',   sortIndex:1, subIndex:0 },
+    { key:'RED',      sortIndex:2, subIndex:0 },
+    { key:'RUBINE',   sortIndex:2, subIndex:1 },
+    { key:'BORDEAUX', sortIndex:2, subIndex:2 },
+    { key:'NAVY',     sortIndex:4, subIndex:0 },
+    { key:'BLUE',     sortIndex:3, subIndex:0 },
+    { key:'PURPLE',   sortIndex:5, subIndex:0 },
+    { key:'VIOLET',   sortIndex:5, subIndex:0 },
+    { key:'BLACK',    sortIndex:6, subIndex:0 },
   ];
   function colorSortIndex(name){
     const upper = String(name||'').toUpperCase();
     for(const c of COLOR_DEFS){
-      if(upper.includes(c.key)) return c.sortIndex;
+      if(upper.includes(c.key)) return c.sortIndex * 10 + c.subIndex;
     }
-    return 99; // 無法辨識顏色的排最後
+    return 999; // 無法辨識顏色的排最後
   }
 
   const stockListEl = document.getElementById('stockList');
+  const watchlistEl = document.getElementById('watchlistBlock');
   const products = Object.values(productMap);
   document.getElementById('stockListCount').textContent = products.length + ' 項';
 
+  const trendOf = (actual, expected) => {
+    const diff = actual - expected;
+    const pct = expected !== 0 ? (diff/expected*100) : (actual > 0 ? 100 : 0);
+    const dir = pct > 20 ? 'up' : (pct < -20 ? 'down' : 'flat');
+    const arrow = dir==='up' ? '▲' : (dir==='down' ? '▼' : '—');
+    return { dir, arrow, pct };
+  };
+
   if(products.length === 0){
     stockListEl.innerHTML = '<div class="empty">尚無可辨識日期的訂購資料</div>';
+    watchlistEl.innerHTML = '';
   } else {
     products.forEach(p => {
       p.monthCount = Math.max(p.months.size, 1);
       p.fullAvg = p.totalQty / p.monthCount;
+      p.expected7d = p.fullAvg * (7/30);
+      p.expected30d = p.fullAvg;
+      p.t7 = trendOf(p.recent7Qty, p.expected7d);
+      p.t30 = trendOf(p.recent30Qty, p.expected30d);
     });
+
+    // ---- 需留意品項：近30天完全沒下單，或用量明顯下降 ----
+    const watchItems = products
+      .filter(p => p.fullAvg > 0.5 && (p.recent30Qty === 0 || p.t30.dir === 'down'))
+      .map(p => ({
+        p,
+        severity: p.recent30Qty === 0 ? -999 : p.t30.pct
+      }))
+      .sort((a,b) => a.severity - b.severity);
+
+    if(watchItems.length === 0){
+      watchlistEl.innerHTML = '';
+    } else {
+      watchlistEl.innerHTML = `
+        <div class="watchlist-block">
+          <div class="watchlist-title">⚠ 需留意品項（${watchItems.length}）</div>
+          ${watchItems.map(({p}) => {
+            const tag = p.recent30Qty === 0 ? '近30天無下單' : `▼ 較平常下降 ${Math.abs(p.t30.pct).toFixed(0)}%`;
+            return `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                </div>
+                <div class="w-tag">${tag}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
 
     const grouped = {};
     products.forEach(p => {
@@ -741,31 +813,18 @@ function render(items){
       grouped[cat].push(p);
     });
 
-    const trendOf = (actual, expected) => {
-      const diff = actual - expected;
-      const pct = expected !== 0 ? (diff/expected*100) : (actual > 0 ? 100 : 0);
-      const dir = pct > 20 ? 'up' : (pct < -20 ? 'down' : 'flat');
-      const arrow = dir==='up' ? '▲' : (dir==='down' ? '▼' : '—');
-      return { dir, arrow };
-    };
-
-    const renderRow = (p) => {
-      const expected7d = p.fullAvg * (7/30);
-      const expected30d = p.fullAvg; // 全期月均本身就約等於30天的期望量
-      const t7 = trendOf(p.recent7Qty, expected7d);
-      const t30 = trendOf(p.recent30Qty, expected30d);
-      return `
+    const renderRow = (p) => `
         <div class="stock-row">
           <div>
             <div class="s-name">${escapeHtml(p.name || p.code)}</div>
             <div class="s-code">${escapeHtml(p.code)}</div>
           </div>
+          <div class="s-num"><span class="s-num-label">單價</span>${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'}</div>
           <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
-          <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${t7.dir}">${t7.arrow}</span></div>
-          <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${t30.dir}">${t30.arrow}</span></div>
+          <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${p.t7.dir}">${p.t7.arrow}</span></div>
+          <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${p.t30.dir}">${p.t30.arrow}</span></div>
         </div>
       `;
-    };
 
     let html = '';
     CATEGORY_ORDER.forEach(cat => {
@@ -819,7 +878,7 @@ function render(items){
           <div class="r-name">${escapeHtml(i.name || i.code)}</div>
           <div class="r-code">${escapeHtml(i.code)}</div>
         </div>
-        <div class="r-qty">${fmtInt(i.amount)} đ</div>
+        <div class="r-qty" style="${i.priceMissing ? 'color:var(--seal);' : ''}">${i.priceMissing ? `缺單價（數量 ${fmtInt(i.qty)}）` : fmtInt(i.amount) + ' đ'}</div>
         <div class="chop ${i.owed>0 ? '' : 'done'}">${i.owed>0 ? '待出貨' : '已結清'}</div>
         <div class="r-date">${escapeHtml(i.date)}</div>
       </div>
