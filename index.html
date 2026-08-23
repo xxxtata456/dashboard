@@ -217,7 +217,7 @@
   /* 產品備貨分析 */
   .stock-row{
     display:grid;
-    grid-template-columns:1fr auto auto auto auto;
+    grid-template-columns:1fr auto auto auto;
     gap:14px;
     align-items:center;
     padding:13px 4px;
@@ -676,28 +676,50 @@ function render(items){
     }).join('');
   }
 
-  /* ---- 產品備貨分析：依產品分類彙整平均單次訂購量、平均間隔天數、近7天動態 ---- */
+  /* ---- 產品備貨分析：依產品分類彙整全期月均、近7天、近30天動態 ---- */
   const productMap = {};
   withDate.forEach(i => {
     const key = i.code || i.name;
     if(!key) return;
-    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, recent7Qty:0, recent30Qty:0, orderDates:[] };
+    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0 };
     productMap[key].totalQty += i.qty;
     productMap[key].owed += i.owed;
-    productMap[key].orderDates.push(i.dateObj);
+    productMap[key].months.add(i.monthKey);
     const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
     const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) productMap[key].recent7Qty += i.qty;
     if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) productMap[key].recent30Qty += i.qty;
   });
 
-  const CATEGORY_ORDER = ['MEKICRON','SUNACID','SUNACRYL','SUNAZOL','其他'];
+  const CATEGORY_ORDER = ['分散','酸性','反應','鹽基','HeiQ','助劑'];
+  const DYE_CATEGORIES = ['分散','酸性','反應','鹽基']; // 這幾類要再依染料顏色細分排序
   function categorize(name){
     const upper = String(name||'').toUpperCase();
-    for(const cat of CATEGORY_ORDER){
-      if(cat !== '其他' && upper.includes(cat)) return cat;
+    if(upper.includes('MEKICRON') || upper.includes('MINCRON')) return '分散';
+    if(upper.includes('SUNACID')) return '酸性';
+    if(upper.includes('SUNAZOL')) return '反應';
+    if(upper.includes('SUNACRYL')) return '鹽基';
+    if(upper.includes('HEIQ')) return 'HeiQ';
+    return '助劑';
+  }
+
+  // 顏色偵測順序（NAVY 要排在 BLUE 前面比對，避免 "NAVY BLUE" 被誤判成藍）；sortIndex 決定顯示順序：黃橘紅藍丈青紫黑
+  const COLOR_DEFS = [
+    { key:'YELLOW', sortIndex:0 },
+    { key:'ORANGE', sortIndex:1 },
+    { key:'RED',    sortIndex:2 },
+    { key:'NAVY',   sortIndex:4 },
+    { key:'BLUE',   sortIndex:3 },
+    { key:'PURPLE', sortIndex:5 },
+    { key:'VIOLET', sortIndex:5 },
+    { key:'BLACK',  sortIndex:6 },
+  ];
+  function colorSortIndex(name){
+    const upper = String(name||'').toUpperCase();
+    for(const c of COLOR_DEFS){
+      if(upper.includes(c.key)) return c.sortIndex;
     }
-    return '其他';
+    return 99; // 無法辨識顏色的排最後
   }
 
   const stockListEl = document.getElementById('stockList');
@@ -708,15 +730,8 @@ function render(items){
     stockListEl.innerHTML = '<div class="empty">尚無可辨識日期的訂購資料</div>';
   } else {
     products.forEach(p => {
-      p.orderDates.sort((a,b) => a-b);
-      p.orderCount = p.orderDates.length;
-      p.avgOrderSize = p.totalQty / p.orderCount; // 平均每次下單量，才是備貨該參考的量
-      if(p.orderCount >= 2){
-        const spanDays = (p.orderDates[p.orderDates.length-1] - p.orderDates[0]) / (1000*60*60*24);
-        p.avgIntervalDays = spanDays / (p.orderCount - 1);
-      } else {
-        p.avgIntervalDays = null; // 只下過一次單，無法算間隔
-      }
+      p.monthCount = Math.max(p.months.size, 1);
+      p.fullAvg = p.totalQty / p.monthCount;
     });
 
     const grouped = {};
@@ -726,39 +741,48 @@ function render(items){
       grouped[cat].push(p);
     });
 
+    const trendOf = (actual, expected) => {
+      const diff = actual - expected;
+      const pct = expected !== 0 ? (diff/expected*100) : (actual > 0 ? 100 : 0);
+      const dir = pct > 20 ? 'up' : (pct < -20 ? 'down' : 'flat');
+      const arrow = dir==='up' ? '▲' : (dir==='down' ? '▼' : '—');
+      return { dir, arrow };
+    };
+
+    const renderRow = (p) => {
+      const expected7d = p.fullAvg * (7/30);
+      const expected30d = p.fullAvg; // 全期月均本身就約等於30天的期望量
+      const t7 = trendOf(p.recent7Qty, expected7d);
+      const t30 = trendOf(p.recent30Qty, expected30d);
+      return `
+        <div class="stock-row">
+          <div>
+            <div class="s-name">${escapeHtml(p.name || p.code)}</div>
+            <div class="s-code">${escapeHtml(p.code)}</div>
+          </div>
+          <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
+          <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${t7.dir}">${t7.arrow}</span></div>
+          <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${t30.dir}">${t30.arrow}</span></div>
+        </div>
+      `;
+    };
+
     let html = '';
     CATEGORY_ORDER.forEach(cat => {
       const list = grouped[cat];
       if(!list || list.length === 0) return;
       html += `<div class="category-header">${cat}（${list.length}項）</div>`;
-      html += list
-        .sort((a,b) => b.recent7Qty - a.recent7Qty)
-        .map(p => {
-          const expected7d = p.avgIntervalDays ? (p.avgOrderSize / p.avgIntervalDays * 7) : 0;
-          const expected30d = p.avgIntervalDays ? (p.avgOrderSize / p.avgIntervalDays * 30) : 0;
-          const trendOf = (actual, expected) => {
-            const diff = actual - expected;
-            const pct = expected !== 0 ? (diff/expected*100) : (actual > 0 ? 100 : 0);
-            const dir = pct > 20 ? 'up' : (pct < -20 ? 'down' : 'flat');
-            const arrow = dir==='up' ? '▲' : (dir==='down' ? '▼' : '—');
-            return { dir, arrow };
-          };
-          const t7 = trendOf(p.recent7Qty, expected7d);
-          const t30 = trendOf(p.recent30Qty, expected30d);
-          const intervalText = p.avgIntervalDays ? `每${Math.round(p.avgIntervalDays)}天` : '僅1筆';
-          return `
-            <div class="stock-row">
-              <div>
-                <div class="s-name">${escapeHtml(p.name || p.code)}</div>
-                <div class="s-code">${escapeHtml(p.code)}</div>
-              </div>
-              <div class="s-num"><span class="s-num-label">平均單次訂購量</span>${fmtInt(p.avgOrderSize)}</div>
-              <div class="s-num"><span class="s-num-label">平均間隔</span>${intervalText}</div>
-              <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${t7.dir}">${t7.arrow}</span></div>
-              <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${t30.dir}">${t30.arrow}</span></div>
-            </div>
-          `;
-        }).join('');
+      if(DYE_CATEGORIES.includes(cat)){
+        // 染料類：先依顏色排序（黃橘紅藍丈青紫黑），同色再依近7天用量排
+        list.sort((a,b) => {
+          const ca = colorSortIndex(a.name), cb = colorSortIndex(b.name);
+          if(ca !== cb) return ca - cb;
+          return b.recent7Qty - a.recent7Qty;
+        });
+      } else {
+        list.sort((a,b) => b.recent7Qty - a.recent7Qty);
+      }
+      html += list.map(renderRow).join('');
     });
     stockListEl.innerHTML = html;
   }
