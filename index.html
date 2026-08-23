@@ -214,6 +214,29 @@
   .period-card .p-amount{ font-family:'IBM Plex Mono',monospace; font-size:17px; font-weight:600; }
   .period-card .p-sub{ font-size:11px; color:var(--ink-dim); margin-top:6px; }
 
+  /* 產品備貨分析 */
+  .stock-row{
+    display:grid;
+    grid-template-columns:1fr auto auto auto auto;
+    gap:14px;
+    align-items:center;
+    padding:13px 4px;
+    border-bottom:1px dashed var(--line);
+  }
+  @media (max-width:640px){
+    .stock-row{ grid-template-columns:1fr; gap:4px; }
+    .stock-row .s-metric{ display:flex; justify-content:space-between; font-size:12px; }
+    .stock-row .s-metric .s-metric-label{ color:var(--ink-dim); }
+  }
+  .stock-row .s-name{ font-size:14px; }
+  .stock-row .s-code{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-dim); }
+  .stock-row .s-num{ font-family:'IBM Plex Mono',monospace; font-size:13px; text-align:right; white-space:nowrap; }
+  .stock-row .s-num .s-num-label{ display:block; font-size:10px; color:var(--ink-dim); font-family:'Noto Sans TC',sans-serif; margin-bottom:2px; }
+  .stock-row .s-trend{ font-size:11px; font-weight:700; }
+  .stock-row .s-trend.up{ color:var(--jade); }
+  .stock-row .s-trend.down{ color:var(--seal); }
+  .stock-row .s-trend.flat{ color:var(--ink-dim); }
+
   /* footer / reload */
   .foot{ margin-top:40px; display:flex; justify-content:center; }
   .reload{
@@ -305,6 +328,15 @@
 
   <div class="section-title">
     <span class="num">04</span>
+    <h2>產品備貨分析</h2>
+    <span class="count" id="stockListCount"></span>
+  </div>
+  <div class="ledger" id="stockList">
+    <div class="empty">讀取中…</div>
+  </div>
+
+  <div class="section-title">
+    <span class="num">05</span>
     <h2>近期訂單</h2>
     <span class="count" id="recentListCount"></span>
   </div>
@@ -594,6 +626,52 @@ function render(items){
         </div>
       `;
     }).join('');
+  }
+
+  /* ---- 產品備貨分析：依產品代碼彙整累計訂購量、全期月均、近3月月均 ---- */
+  const productMap = {};
+  withDate.forEach(i => {
+    const key = i.code || i.name;
+    if(!key) return;
+    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, months:new Set(), owed:0, recent3Qty:0 };
+    productMap[key].totalQty += i.qty;
+    productMap[key].owed += i.owed;
+    productMap[key].months.add(i.monthKey);
+    const threeMonthsAgo = new Date(today); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth()-3);
+    if(i.dateObj >= threeMonthsAgo && i.dateObj <= today) productMap[key].recent3Qty += i.qty;
+  });
+  const stockListEl = document.getElementById('stockList');
+  const products = Object.values(productMap);
+  document.getElementById('stockListCount').textContent = products.length + ' 項';
+  if(products.length === 0){
+    stockListEl.innerHTML = '<div class="empty">尚無可辨識日期的訂購資料</div>';
+  } else {
+    products.forEach(p => {
+      p.monthCount = Math.max(p.months.size, 1);
+      p.fullAvg = p.totalQty / p.monthCount;
+      p.recent3Avg = p.recent3Qty / 3;
+    });
+    stockListEl.innerHTML = products
+      .sort((a,b) => b.recent3Avg - a.recent3Avg)
+      .slice(0, 20)
+      .map(p => {
+        const diff = p.recent3Avg - p.fullAvg;
+        const pct = p.fullAvg !== 0 ? (diff/p.fullAvg*100) : 0;
+        const dir = diff > 3 ? 'up' : (diff < -3 ? 'down' : 'flat');
+        const arrow = dir==='up' ? '▲加速' : (dir==='down' ? '▼趨緩' : '— 持平');
+        return `
+          <div class="stock-row">
+            <div>
+              <div class="s-name">${escapeHtml(p.name || p.code)}</div>
+              <div class="s-code">${escapeHtml(p.code)}</div>
+            </div>
+            <div class="s-num"><span class="s-num-label">累計訂購</span>${fmtInt(p.totalQty)}</div>
+            <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
+            <div class="s-num"><span class="s-num-label">近3月月均</span>${fmtInt(p.recent3Avg)}</div>
+            <div class="s-trend ${dir}">${arrow}</div>
+          </div>
+        `;
+      }).join('');
   }
 
   const pendingListEl = document.getElementById('pendingList');
