@@ -217,7 +217,7 @@
   /* 產品備貨分析 */
   .stock-row{
     display:grid;
-    grid-template-columns:1fr auto auto auto;
+    grid-template-columns:1fr auto auto auto auto;
     gap:14px;
     align-items:center;
     padding:13px 4px;
@@ -236,6 +236,10 @@
   .stock-row .s-trend.up{ color:var(--jade); }
   .stock-row .s-trend.down{ color:var(--seal); }
   .stock-row .s-trend.flat{ color:var(--ink-dim); }
+  .stock-row .s-num .s-trend-mini{ font-size:10px; margin-left:4px; }
+  .stock-row .s-num .s-trend-mini.up{ color:var(--jade); }
+  .stock-row .s-num .s-trend-mini.down{ color:var(--seal); }
+  .stock-row .s-num .s-trend-mini.flat{ color:var(--ink-dim); }
 
   /* 頂層分頁 */
   .main-tabs{
@@ -250,6 +254,18 @@
     margin-right:20px;
   }
   .main-tab.active{ color:var(--seal); border-bottom-color:var(--seal); }
+
+  /* 產品分類標題 */
+  .category-header{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    color:var(--brass);
+    letter-spacing:0.1em;
+    padding:16px 4px 8px;
+    border-bottom:1px solid var(--line);
+    margin-top:6px;
+  }
+  .category-header:first-child{ margin-top:0; }
 
   /* footer / reload */
   .foot{ margin-top:40px; display:flex; justify-content:center; }
@@ -660,48 +676,91 @@ function render(items){
     }).join('');
   }
 
-  /* ---- 產品備貨分析：依產品代碼彙整累計訂購量、全期月均、近3月月均 ---- */
+  /* ---- 產品備貨分析：依產品分類彙整平均單次訂購量、平均間隔天數、近7天動態 ---- */
   const productMap = {};
   withDate.forEach(i => {
     const key = i.code || i.name;
     if(!key) return;
-    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, months:new Set(), owed:0, recent3Qty:0 };
+    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, recent7Qty:0, recent30Qty:0, orderDates:[] };
     productMap[key].totalQty += i.qty;
     productMap[key].owed += i.owed;
-    productMap[key].months.add(i.monthKey);
-    const threeMonthsAgo = new Date(today); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth()-3);
-    if(i.dateObj >= threeMonthsAgo && i.dateObj <= today) productMap[key].recent3Qty += i.qty;
+    productMap[key].orderDates.push(i.dateObj);
+    const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
+    const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
+    if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) productMap[key].recent7Qty += i.qty;
+    if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) productMap[key].recent30Qty += i.qty;
   });
+
+  const CATEGORY_ORDER = ['MEKICRON','SUNACID','SUNACRYL','SUNAZOL','其他'];
+  function categorize(name){
+    const upper = String(name||'').toUpperCase();
+    for(const cat of CATEGORY_ORDER){
+      if(cat !== '其他' && upper.includes(cat)) return cat;
+    }
+    return '其他';
+  }
+
   const stockListEl = document.getElementById('stockList');
   const products = Object.values(productMap);
   document.getElementById('stockListCount').textContent = products.length + ' 項';
+
   if(products.length === 0){
     stockListEl.innerHTML = '<div class="empty">尚無可辨識日期的訂購資料</div>';
   } else {
     products.forEach(p => {
-      p.monthCount = Math.max(p.months.size, 1);
-      p.fullAvg = p.totalQty / p.monthCount;
-      p.recent3Avg = p.recent3Qty / 3;
+      p.orderDates.sort((a,b) => a-b);
+      p.orderCount = p.orderDates.length;
+      p.avgOrderSize = p.totalQty / p.orderCount; // 平均每次下單量，才是備貨該參考的量
+      if(p.orderCount >= 2){
+        const spanDays = (p.orderDates[p.orderDates.length-1] - p.orderDates[0]) / (1000*60*60*24);
+        p.avgIntervalDays = spanDays / (p.orderCount - 1);
+      } else {
+        p.avgIntervalDays = null; // 只下過一次單，無法算間隔
+      }
     });
-    stockListEl.innerHTML = products
-      .sort((a,b) => b.recent3Avg - a.recent3Avg)
-      .map(p => {
-        const diff = p.recent3Avg - p.fullAvg;
-        const pct = p.fullAvg !== 0 ? (diff/p.fullAvg*100) : 0;
-        const dir = diff > 3 ? 'up' : (diff < -3 ? 'down' : 'flat');
-        const arrow = dir==='up' ? '▲加速' : (dir==='down' ? '▼趨緩' : '— 持平');
-        return `
-          <div class="stock-row">
-            <div>
-              <div class="s-name">${escapeHtml(p.name || p.code)}</div>
-              <div class="s-code">${escapeHtml(p.code)}</div>
+
+    const grouped = {};
+    products.forEach(p => {
+      const cat = categorize(p.name);
+      if(!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(p);
+    });
+
+    let html = '';
+    CATEGORY_ORDER.forEach(cat => {
+      const list = grouped[cat];
+      if(!list || list.length === 0) return;
+      html += `<div class="category-header">${cat}（${list.length}項）</div>`;
+      html += list
+        .sort((a,b) => b.recent7Qty - a.recent7Qty)
+        .map(p => {
+          const expected7d = p.avgIntervalDays ? (p.avgOrderSize / p.avgIntervalDays * 7) : 0;
+          const expected30d = p.avgIntervalDays ? (p.avgOrderSize / p.avgIntervalDays * 30) : 0;
+          const trendOf = (actual, expected) => {
+            const diff = actual - expected;
+            const pct = expected !== 0 ? (diff/expected*100) : (actual > 0 ? 100 : 0);
+            const dir = pct > 20 ? 'up' : (pct < -20 ? 'down' : 'flat');
+            const arrow = dir==='up' ? '▲' : (dir==='down' ? '▼' : '—');
+            return { dir, arrow };
+          };
+          const t7 = trendOf(p.recent7Qty, expected7d);
+          const t30 = trendOf(p.recent30Qty, expected30d);
+          const intervalText = p.avgIntervalDays ? `每${Math.round(p.avgIntervalDays)}天` : '僅1筆';
+          return `
+            <div class="stock-row">
+              <div>
+                <div class="s-name">${escapeHtml(p.name || p.code)}</div>
+                <div class="s-code">${escapeHtml(p.code)}</div>
+              </div>
+              <div class="s-num"><span class="s-num-label">平均單次訂購量</span>${fmtInt(p.avgOrderSize)}</div>
+              <div class="s-num"><span class="s-num-label">平均間隔</span>${intervalText}</div>
+              <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${t7.dir}">${t7.arrow}</span></div>
+              <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${t30.dir}">${t30.arrow}</span></div>
             </div>
-            <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
-            <div class="s-num"><span class="s-num-label">近3月月均</span>${fmtInt(p.recent3Avg)}</div>
-            <div class="s-trend ${dir}">${arrow}</div>
-          </div>
-        `;
-      }).join('');
+          `;
+        }).join('');
+    });
+    stockListEl.innerHTML = html;
   }
 
   const pendingListEl = document.getElementById('pendingList');
