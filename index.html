@@ -217,7 +217,7 @@
   /* 產品備貨分析 */
   .stock-row{
     display:grid;
-    grid-template-columns:1fr auto auto auto auto;
+    grid-template-columns:1fr auto auto auto;
     gap:14px;
     align-items:center;
     padding:13px 4px;
@@ -236,6 +236,20 @@
   .stock-row .s-trend.up{ color:var(--jade); }
   .stock-row .s-trend.down{ color:var(--seal); }
   .stock-row .s-trend.flat{ color:var(--ink-dim); }
+
+  /* 頂層分頁 */
+  .main-tabs{
+    display:flex; gap:8px; margin:24px 0 20px;
+    border-bottom:1px solid var(--line);
+  }
+  .main-tab{
+    background:transparent; border:none; color:var(--ink-dim);
+    padding:10px 4px; font-size:14px; font-weight:700; cursor:pointer;
+    font-family:'Noto Serif TC',serif;
+    border-bottom:2px solid transparent;
+    margin-right:20px;
+  }
+  .main-tab.active{ color:var(--seal); border-bottom-color:var(--seal); }
 
   /* footer / reload */
   .foot{ margin-top:40px; display:flex; justify-content:center; }
@@ -306,42 +320,53 @@
     <div class="empty">讀取中…</div>
   </div>
 
-  <div class="section-title">
-    <span class="num">02</span>
-    <h2>業績週期比較</h2>
-  </div>
-  <div class="period-tabs">
-    <button class="period-tab active" id="tabCalendar" onclick="switchPeriodTab('calendar')">日曆制（月／季／年）</button>
-    <button class="period-tab" id="tabRolling" onclick="switchPeriodTab('rolling')">移動天數（近N天）</button>
-  </div>
-  <div class="period-grid" id="calendarGrid"></div>
-  <div class="period-grid four" id="rollingGrid" style="display:none;"></div>
-
-  <div class="section-title">
-    <span class="num">03</span>
-    <h2>月度業績走勢</h2>
-    <span class="count" id="trendMonthCount"></span>
-  </div>
-  <div class="ledger" id="trendList">
-    <div class="empty">讀取中…</div>
+  <div class="main-tabs">
+    <button class="main-tab active" id="mainTabRevenue" onclick="switchMainTab('revenue')">業績金額</button>
+    <button class="main-tab" id="mainTabQty" onclick="switchMainTab('qty')">訂單產品數量</button>
   </div>
 
-  <div class="section-title">
-    <span class="num">04</span>
-    <h2>產品備貨分析</h2>
-    <span class="count" id="stockListCount"></span>
-  </div>
-  <div class="ledger" id="stockList">
-    <div class="empty">讀取中…</div>
+  <!-- ===== 業績金額分頁 ===== -->
+  <div id="panelRevenue">
+    <div class="section-title">
+      <span class="num">02</span>
+      <h2>業績週期比較</h2>
+    </div>
+    <div class="period-tabs">
+      <button class="period-tab active" id="tabCalendar" onclick="switchPeriodTab('calendar')">日曆制（月／季／年）</button>
+      <button class="period-tab" id="tabRolling" onclick="switchPeriodTab('rolling')">移動天數（近N天）</button>
+    </div>
+    <div class="period-grid" id="calendarGrid"></div>
+    <div class="period-grid four" id="rollingGrid" style="display:none;"></div>
+
+    <div class="section-title">
+      <span class="num">03</span>
+      <h2>月度業績走勢</h2>
+      <span class="count" id="trendMonthCount"></span>
+    </div>
+    <div class="ledger" id="trendList">
+      <div class="empty">讀取中…</div>
+    </div>
+
+    <div class="section-title">
+      <span class="num">04</span>
+      <h2>近期訂單</h2>
+      <span class="count" id="recentListCount"></span>
+    </div>
+    <div class="ledger" id="recentList">
+      <div class="empty">讀取中…</div>
+    </div>
   </div>
 
-  <div class="section-title">
-    <span class="num">05</span>
-    <h2>近期訂單</h2>
-    <span class="count" id="recentListCount"></span>
-  </div>
-  <div class="ledger" id="recentList">
-    <div class="empty">讀取中…</div>
+  <!-- ===== 訂單產品數量分頁 ===== -->
+  <div id="panelQty" style="display:none;">
+    <div class="section-title">
+      <span class="num">02</span>
+      <h2>產品備貨分析</h2>
+      <span class="count" id="stockListCount"></span>
+    </div>
+    <div class="ledger" id="stockList">
+      <div class="empty">讀取中…</div>
+    </div>
   </div>
 
   <div class="foot">
@@ -517,6 +542,13 @@ function switchPeriodTab(mode){
   document.getElementById('rollingGrid').style.display = mode==='rolling' ? 'grid' : 'none';
 }
 
+function switchMainTab(mode){
+  document.getElementById('mainTabRevenue').classList.toggle('active', mode==='revenue');
+  document.getElementById('mainTabQty').classList.toggle('active', mode==='qty');
+  document.getElementById('panelRevenue').style.display = mode==='revenue' ? 'block' : 'none';
+  document.getElementById('panelQty').style.display = mode==='qty' ? 'block' : 'none';
+}
+
 function fmtInt(n){ return Math.round(n).toLocaleString('zh-Hant'); }
 
 function fmtDateShort(d){
@@ -653,7 +685,6 @@ function render(items){
     });
     stockListEl.innerHTML = products
       .sort((a,b) => b.recent3Avg - a.recent3Avg)
-      .slice(0, 20)
       .map(p => {
         const diff = p.recent3Avg - p.fullAvg;
         const pct = p.fullAvg !== 0 ? (diff/p.fullAvg*100) : 0;
@@ -665,7 +696,6 @@ function render(items){
               <div class="s-name">${escapeHtml(p.name || p.code)}</div>
               <div class="s-code">${escapeHtml(p.code)}</div>
             </div>
-            <div class="s-num"><span class="s-num-label">累計訂購</span>${fmtInt(p.totalQty)}</div>
             <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
             <div class="s-num"><span class="s-num-label">近3月月均</span>${fmtInt(p.recent3Avg)}</div>
             <div class="s-trend ${dir}">${arrow}</div>
