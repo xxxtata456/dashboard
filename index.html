@@ -536,7 +536,8 @@ function parseLedger(rows){
     // 過濾雜訊列：代碼／品名純數字（多半是誤讀到合計列或日期欄位），且沒有任何實際訂單金額
     const looksLikeJunk = /^[\d.,]+$/.test(code) && /^[\d.,]+$/.test(name || '0');
     if(looksLikeJunk && price === 0 && qty === 0 && owed === 0) continue;
-    if(price === 0 && qty === 0 && owed === 0 && !name) continue;
+    // 數量跟還欠都是0，代表不是真正的訂單列（可能是合併儲存格造成的殘留列），一律排除
+    if(qty === 0 && owed === 0) continue;
     const rawDate = colDate>=0 ? row[colDate] : '';
     const dateObj = toDateObj(rawDate);
     const monthKey = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}` : null;
@@ -700,20 +701,25 @@ function render(items){
   withDate.forEach(i => {
     const key = i.code || i.name;
     if(!key) return;
-    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0, latestPrice:0, latestPriceDate:null };
-    productMap[key].totalQty += i.qty;
-    productMap[key].owed += i.owed;
-    productMap[key].months.add(i.monthKey);
+    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0, latestPrice:0, latestPriceDate:null, orderCount:0, firstDate:null, lastDate:null };
+    const pm = productMap[key];
+    pm.totalQty += i.qty;
+    pm.owed += i.owed;
+    pm.months.add(i.monthKey);
+    pm.orderCount += 1;
+    if(!pm.firstDate || i.dateObj < pm.firstDate) pm.firstDate = i.dateObj;
+    if(!pm.lastDate || i.dateObj > pm.lastDate) pm.lastDate = i.dateObj;
     const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
     const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
-    if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) productMap[key].recent7Qty += i.qty;
-    if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) productMap[key].recent30Qty += i.qty;
+    if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) pm.recent7Qty += i.qty;
+    if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recent30Qty += i.qty;
     // 追蹤該產品「最新一筆有填單價」的訂單，作為目前單價參考
-    if(i.price > 0 && (!productMap[key].latestPriceDate || i.dateObj > productMap[key].latestPriceDate)){
-      productMap[key].latestPrice = i.price;
-      productMap[key].latestPriceDate = i.dateObj;
+    if(i.price > 0 && (!pm.latestPriceDate || i.dateObj > pm.latestPriceDate)){
+      pm.latestPrice = i.price;
+      pm.latestPriceDate = i.dateObj;
     }
   });
+
 
 
   const CATEGORY_ORDER = ['分散','酸性','反應','鹽基','HeiQ','助劑'];
@@ -773,21 +779,28 @@ function render(items){
       p.expected30d = p.fullAvg;
       p.t7 = trendOf(p.recent7Qty, p.expected7d);
       p.t30 = trendOf(p.recent30Qty, p.expected30d);
+      // 規律性：活躍期間（首次~最後一次下單）內，有下單的月份佔比多高
+      const spanMonths = (p.lastDate.getFullYear()*12 + p.lastDate.getMonth()) - (p.firstDate.getFullYear()*12 + p.firstDate.getMonth()) + 1;
+      p.activeSpanMonths = spanMonths;
+      p.regularity = p.months.size / spanMonths;
     });
 
-    // ---- 需留意品項：近30天完全沒下單，或用量明顯下降 ----
+    // ---- 需留意品項：過去下單很規律，但近30天突然沒下單，或用量明顯下降 ----
+    const REGULARITY_THRESHOLD = 0.6; // 活躍期間內至少6成月份都有下單，才算「規律」
     const watchItems = products
-      .filter(p => p.fullAvg > 0.5 && (p.recent30Qty === 0 || p.t30.dir === 'down'))
+      .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && (p.recent30Qty === 0 || p.t30.dir === 'down'))
       .map(p => ({
         p,
         severity: p.recent30Qty === 0 ? -999 : p.t30.pct
       }))
       .sort((a,b) => a.severity - b.severity);
 
-    if(watchItems.length === 0){
-      watchlistEl.innerHTML = '';
-    } else {
-      watchlistEl.innerHTML = `
+    // ---- 疑似代碼誤植：整個歷史紀錄裡只出現過1筆訂單，可能是助理打錯字產生的獨立代碼 ----
+    const suspiciousItems = products.filter(p => p.orderCount === 1);
+
+    let watchHtml = '';
+    if(watchItems.length > 0){
+      watchHtml += `
         <div class="watchlist-block">
           <div class="watchlist-title">⚠ 需留意品項（${watchItems.length}）</div>
           ${watchItems.map(({p}) => {
@@ -805,6 +818,23 @@ function render(items){
         </div>
       `;
     }
+    if(suspiciousItems.length > 0){
+      watchHtml += `
+        <div class="watchlist-block">
+          <div class="watchlist-title">🔍 疑似代碼誤植（僅出現1筆，建議確認）（${suspiciousItems.length}）</div>
+          ${suspiciousItems.map(p => `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 訂購數量 ${fmtInt(p.totalQty)}</div>
+                </div>
+                <div class="w-tag">${fmtDateShort(p.firstDate)}</div>
+              </div>
+            `).join('')}
+        </div>
+      `;
+    }
+    watchlistEl.innerHTML = watchHtml;
 
     const grouped = {};
     products.forEach(p => {
