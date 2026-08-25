@@ -747,9 +747,9 @@ function render(items){
       const a = rawProducts[i], b = rawProducts[j];
       if(a.code === b.code) continue;
       const nameMatch = normName(a.name) === normName(b.name) && normName(a.name) !== '';
-      const codeSimilar = a.code && b.code && levenshtein(a.code.toUpperCase(), b.code.toUpperCase()) <= 2 && Math.abs(a.code.length-b.code.length) <= 2;
-      const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && Math.abs(a.latestPrice-b.latestPrice) / Math.max(a.latestPrice,b.latestPrice) <= 0.02;
-      const matchCount = [nameMatch, codeSimilar, priceMatch].filter(Boolean).length;
+      const codeMatch = a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對
+      const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && a.latestPrice === b.latestPrice; // 完全相等，不做容許誤差
+      const matchCount = [nameMatch, codeMatch, priceMatch].filter(Boolean).length;
       if(matchCount >= 2) union(i, j);
     }
   }
