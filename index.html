@@ -180,6 +180,9 @@
   .trend-row .t-change.up{ color:var(--jade); }
   .trend-row .t-change.down{ color:var(--seal); }
   .trend-row .t-change.flat{ color:var(--ink-dim); }
+  .trend-row .t-yoy{ display:block; font-size:10px; color:var(--ink-dim); text-align:right; margin-top:2px; }
+  .trend-row .t-yoy.up{ color:var(--jade); }
+  .trend-row .t-yoy.down{ color:var(--seal); }
 
   .mom-chip{
     display:inline-flex; align-items:center; gap:4px;
@@ -213,6 +216,10 @@
   .period-card .p-label{ font-size:11px; color:var(--ink-dim); margin-bottom:8px; }
   .period-card .p-amount{ font-family:'IBM Plex Mono',monospace; font-size:17px; font-weight:600; }
   .period-card .p-sub{ font-size:11px; color:var(--ink-dim); margin-top:6px; }
+  .period-card .p-yoy{ font-size:11px; font-weight:700; margin-top:4px; }
+  .period-card .p-yoy.up{ color:var(--jade); }
+  .period-card .p-yoy.down{ color:var(--seal); }
+  .period-card .p-yoy.flat{ color:var(--ink-dim); font-weight:400; }
 
   /* 產品備貨分析 */
   .stock-row{
@@ -631,11 +638,27 @@ function render(items){
   const quarterTotal = sumIf(i => i.dateObj.getFullYear()===curY && Math.floor(i.dateObj.getMonth()/3)===curQ);
   const yearTotal = sumIf(i => i.dateObj.getFullYear()===curY);
 
+  // 去年同期比較，抓淡旺季用
+  const lyMonthTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && i.dateObj.getMonth()===curM);
+  const lyQuarterTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && Math.floor(i.dateObj.getMonth()/3)===curQ);
+  const lyYearTotal = sumIf(i => i.dateObj.getFullYear()===curY-1);
+
+  const yoyHtml = (curVal, lyVal) => {
+    if(lyVal === 0){
+      return curVal > 0 ? '<div class="p-yoy flat">去年同期無資料</div>' : '';
+    }
+    const diff = curVal - lyVal;
+    const pct = diff / lyVal * 100;
+    const dir = pct > 0 ? 'up' : (pct < 0 ? 'down' : 'flat');
+    const arrow = pct > 0 ? '▲' : (pct < 0 ? '▼' : '—');
+    return `<div class="p-yoy ${dir}">${arrow} ${Math.abs(pct).toFixed(0)}% 較去年同期</div>`;
+  };
+
   const calendarGrid = document.getElementById('calendarGrid');
   calendarGrid.innerHTML = `
-    <div class="period-card"><div class="p-label">本月</div><div class="p-amount mono">${fmtInt(monthTotal)} đ</div><div class="p-sub">${curY}年${curM+1}月</div></div>
-    <div class="period-card"><div class="p-label">本季</div><div class="p-amount mono">${fmtInt(quarterTotal)} đ</div><div class="p-sub">${curY}年第${curQ+1}季</div></div>
-    <div class="period-card"><div class="p-label">本年</div><div class="p-amount mono">${fmtInt(yearTotal)} đ</div><div class="p-sub">${curY}年全年</div></div>
+    <div class="period-card"><div class="p-label">本月</div><div class="p-amount mono">${fmtInt(monthTotal)} đ</div><div class="p-sub">${curY}年${curM+1}月</div>${yoyHtml(monthTotal, lyMonthTotal)}</div>
+    <div class="period-card"><div class="p-label">本季</div><div class="p-amount mono">${fmtInt(quarterTotal)} đ</div><div class="p-sub">${curY}年第${curQ+1}季</div>${yoyHtml(quarterTotal, lyQuarterTotal)}</div>
+    <div class="period-card"><div class="p-label">本年</div><div class="p-amount mono">${fmtInt(yearTotal)} đ</div><div class="p-sub">${curY}年全年</div>${yoyHtml(yearTotal, lyYearTotal)}</div>
   `;
 
   // 移動天數制：近30/90/180/365天（以今天為基準往回推）
@@ -700,12 +723,24 @@ function render(items){
         const arrow = d > 0 ? '▲' : (d < 0 ? '▼' : '—');
         changeHtml = `<span class="t-change ${dir}">${arrow} ${Math.abs(p).toFixed(0)}%</span>`;
       }
+      // 去年同月比較（抓淡旺季用）
+      const [yy, mm] = key.split('-');
+      const yoyKey = `${parseInt(yy,10)-1}-${mm}`;
+      let yoyHtmlRow = '';
+      if(monthMap[yoyKey] !== undefined){
+        const lyAmt = monthMap[yoyKey];
+        const d2 = amt - lyAmt;
+        const p2 = lyAmt !== 0 ? (d2/lyAmt*100) : 0;
+        const dir2 = d2 > 0 ? 'up' : (d2 < 0 ? 'down' : 'flat');
+        const arrow2 = d2 > 0 ? '▲' : (d2 < 0 ? '▼' : '—');
+        yoyHtmlRow = `<span class="t-yoy ${dir2}">去年同月 ${arrow2}${Math.abs(p2).toFixed(0)}%</span>`;
+      }
       return `
         <div class="trend-row ${idx===0 ? 'is-current' : ''}">
           <div class="t-month">${monthLabel(key)}</div>
           <div class="t-bar-track"><div class="t-bar-fill" style="width:${barPct}%"></div></div>
           <div class="t-amount">${fmtInt(amt)} đ</div>
-          ${changeHtml}
+          <div>${changeHtml}${yoyHtmlRow}</div>
         </div>
       `;
     }).join('');
