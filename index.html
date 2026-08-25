@@ -591,6 +591,21 @@ function fmtDateShort(d){
   return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
 }
 
+/* 計算兩字串的編輯距離（Levenshtein distance），用於抓出疑似打錯字的相近代碼 */
+function levenshtein(a, b){
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, () => new Array(n+1).fill(0));
+  for(let i=0;i<=m;i++) dp[i][0] = i;
+  for(let j=0;j<=n;j++) dp[0][j] = j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      if(a[i-1] === b[j-1]) dp[i][j] = dp[i-1][j-1];
+      else dp[i][j] = 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+
 function render(items){
   const totalRevenue = items.reduce((s,i)=>s+i.amount,0);
   const orderCount = items.length;
@@ -720,6 +735,58 @@ function render(items){
     }
   });
 
+  /* ---- 自動合併疑似誤植的代碼：比對「品名／代碼／單價」三項，符合2項以上視為同一產品 ---- */
+  let rawProducts = Object.values(productMap);
+  const normName = (n) => String(n||'').trim().toUpperCase().replace(/\s+/g,' ');
+  const parent = rawProducts.map((_,i) => i);
+  function find(x){ while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  function union(a,b){ const ra=find(a), rb=find(b); if(ra!==rb) parent[ra]=rb; }
+
+  for(let i=0;i<rawProducts.length;i++){
+    for(let j=i+1;j<rawProducts.length;j++){
+      const a = rawProducts[i], b = rawProducts[j];
+      if(a.code === b.code) continue;
+      const nameMatch = normName(a.name) === normName(b.name) && normName(a.name) !== '';
+      const codeSimilar = a.code && b.code && levenshtein(a.code.toUpperCase(), b.code.toUpperCase()) <= 2 && Math.abs(a.code.length-b.code.length) <= 2;
+      const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && Math.abs(a.latestPrice-b.latestPrice) / Math.max(a.latestPrice,b.latestPrice) <= 0.02;
+      const matchCount = [nameMatch, codeSimilar, priceMatch].filter(Boolean).length;
+      if(matchCount >= 2) union(i, j);
+    }
+  }
+
+  const mergeGroups = {};
+  rawProducts.forEach((p, idx) => {
+    const root = find(idx);
+    if(!mergeGroups[root]) mergeGroups[root] = [];
+    mergeGroups[root].push(p);
+  });
+
+  const mergeLog = []; // 記錄自動合併的動作，供透明化顯示
+  rawProducts = Object.values(mergeGroups).map(group => {
+    if(group.length === 1) return group[0];
+    // 以「訂單筆數最多」的那個視為正確代碼，其餘合併進去
+    group.sort((a,b) => b.orderCount - a.orderCount);
+    const canonical = group[0];
+    const merged = { ...canonical, months:new Set(canonical.months) };
+    for(let k=1;k<group.length;k++){
+      const dup = group[k];
+      merged.totalQty += dup.totalQty;
+      merged.owed += dup.owed;
+      merged.recent7Qty += dup.recent7Qty;
+      merged.recent30Qty += dup.recent30Qty;
+      merged.orderCount += dup.orderCount;
+      dup.months.forEach(m => merged.months.add(m));
+      if(dup.firstDate < merged.firstDate) merged.firstDate = dup.firstDate;
+      if(dup.lastDate > merged.lastDate) merged.lastDate = dup.lastDate;
+      if(dup.latestPriceDate && (!merged.latestPriceDate || dup.latestPriceDate > merged.latestPriceDate)){
+        merged.latestPrice = dup.latestPrice;
+        merged.latestPriceDate = dup.latestPriceDate;
+      }
+      mergeLog.push({ from: dup, into: canonical });
+    }
+    return merged;
+  });
+
 
 
   const CATEGORY_ORDER = ['分散','酸性','反應','鹽基','HeiQ','助劑'];
@@ -757,7 +824,7 @@ function render(items){
 
   const stockListEl = document.getElementById('stockList');
   const watchlistEl = document.getElementById('watchlistBlock');
-  const products = Object.values(productMap);
+  const products = rawProducts;
   document.getElementById('stockListCount').textContent = products.length + ' 項';
 
   const trendOf = (actual, expected) => {
@@ -796,9 +863,6 @@ function render(items){
       }))
       .sort((a,b) => a.severity - b.severity);
 
-    // ---- 疑似代碼誤植：整個歷史紀錄裡只出現過1筆訂單，可能是助理打錯字產生的獨立代碼 ----
-    const suspiciousItems = products.filter(p => p.orderCount === 1);
-
     let watchHtml = '';
     if(watchItems.length > 0){
       watchHtml += `
@@ -819,17 +883,17 @@ function render(items){
         </div>
       `;
     }
-    if(suspiciousItems.length > 0){
+    if(mergeLog.length > 0){
       watchHtml += `
         <div class="watchlist-block">
-          <div class="watchlist-title">🔍 疑似代碼誤植（僅出現1筆，建議確認）（${suspiciousItems.length}）</div>
-          ${suspiciousItems.map(p => `
+          <div class="watchlist-title">🔧 已自動合併的代碼（品名／代碼／單價，2項以上相符）（${mergeLog.length}組）</div>
+          ${mergeLog.map(({from, into}) => `
               <div class="watch-row">
                 <div>
-                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
-                  <div class="w-code">${escapeHtml(p.code)} · 訂購數量 ${fmtInt(p.totalQty)}</div>
+                  <div class="w-name">${escapeHtml(from.code)}（${fmtInt(from.totalQty)}） <span style="color:var(--ink-dim);">已併入</span> ${escapeHtml(into.code)}（${fmtInt(into.totalQty)}）</div>
+                  <div class="w-code">${escapeHtml(into.name || into.code)}</div>
                 </div>
-                <div class="w-tag">${fmtDateShort(p.firstDate)}</div>
+                <div class="w-tag">已合併</div>
               </div>
             `).join('')}
         </div>
