@@ -374,6 +374,8 @@
 
   <!-- ===== 業績金額分頁 ===== -->
   <div id="panelRevenue">
+    <div id="customerBreakdown" style="display:none;"></div>
+
     <div class="section-title">
       <span class="num">02</span>
       <h2>業績週期比較</h2>
@@ -431,6 +433,7 @@ const SHEET_NAME_HINT = "訂單追蹤表"; // 優先找這個分頁名稱
 /* 客戶清單：之後要加新客戶，只要在這裡加一行 { label, query } 即可
    label：畫面上顯示的名稱／query：用來搜尋 Google Drive 檔案名稱的關鍵字（建議用中文客戶名，較不易撞名） */
 const CUSTOMERS = [
+  { label: '📊 全部客戶總覽', brandCn: '全部客戶總覽', brandVn: '所有客戶彙整 · 業績總覽', isAggregate: true },
   { label: '得力 DELICACY', brandCn: '得力 DELICACY', brandVn: 'ĐƠN HÀNG DELICACY · 訂單帳本', query: 'DELICACY' },
   { label: '巧良 CHEAU LIANG', brandCn: '巧良 CHEAU LIANG', brandVn: 'ĐƠN HÀNG CHEAU LIANG · 訂單帳本', query: 'CHEAU LIANG' },
   { label: '強盛 CHYANG SHENG', brandCn: '強盛 CHYANG SHENG', brandVn: 'ĐƠN HÀNG CHYANG SHENG · 訂單帳本', query: 'CHYANG SHENG' },
@@ -444,7 +447,7 @@ const CUSTOMERS = [
   { label: 'NEEU', brandCn: 'NEEU', brandVn: 'ĐƠN HÀNG NEEU · 訂單帳本', query: 'NEEU' },
 ];
 
-let currentCustomer = CUSTOMERS[0];
+let currentCustomer = CUSTOMERS[1]; // 預設開啟第一家客戶（非彙整總覽），避免一開啟就抓全部客戶拖慢速度
 let tokenClient;
 let accessToken = null;
 
@@ -457,7 +460,7 @@ function showError(msg){
 function populateCustomerSelect(){
   const sel = document.getElementById('customerSelect');
   sel.innerHTML = CUSTOMERS.map((c,i) => `<option value="${i}">${escapeHtml(c.label)}</option>`).join('');
-  sel.value = 0;
+  sel.value = 1;
 }
 
 function switchCustomer(indexStr){
@@ -496,28 +499,59 @@ window.onload = () => {
 
 async function loadData(){
   document.getElementById('errBox').style.display = 'none';
+  if(currentCustomer.isAggregate){
+    await loadAllCustomers();
+    return;
+  }
   try{
-    const fileId = await findFile();
+    const fileId = await findFile(currentCustomer.query);
     const buf = await downloadFile(fileId);
     const workbook = XLSX.read(buf, {type:'array', cellDates:true});
     const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
     const parsed = parseLedger(rows);
-    render(parsed);
+    parsed.forEach(it => it.customerLabel = currentCustomer.label);
+    render(parsed, false);
   } catch(err){
     console.error(err);
     showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + currentCustomer.query + '」，且你的 Google 帳號有檢視權限。');
   }
 }
 
-async function findFile(){
-  const q = encodeURIComponent(`name contains '${currentCustomer.query}' and trashed = false`);
+async function loadAllCustomers(){
+  const realCustomers = CUSTOMERS.filter(c => !c.isAggregate);
+  const allItems = [];
+  const failed = [];
+  for(const c of realCustomers){
+    try{
+      const fileId = await findFile(c.query);
+      const buf = await downloadFile(fileId);
+      const workbook = XLSX.read(buf, {type:'array', cellDates:true});
+      const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
+      const parsed = parseLedger(rows);
+      parsed.forEach(it => it.customerLabel = c.label);
+      allItems.push(...parsed);
+    } catch(err){
+      console.error(c.label, err);
+      failed.push(c.label);
+    }
+  }
+  if(failed.length > 0){
+    showError('以下客戶讀取失敗，總覽數字不包含這些客戶：\n' + failed.join('、'));
+  }
+  render(allItems, true);
+}
+
+async function findFile(query){
+  const q = encodeURIComponent(`name contains '${query}' and trashed = false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=10`;
   const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
   if(!res.ok) throw new Error('搜尋檔案失敗 (HTTP ' + res.status + ')');
   const data = await res.json();
-  if(!data.files || data.files.length === 0) throw new Error('找不到名稱包含「' + currentCustomer.query + '」的檔案');
+  if(!data.files || data.files.length === 0) throw new Error('找不到名稱包含「' + query + '」的檔案');
   // 取最近修改的那個
   data.files.sort((a,b) => new Date(b.modifiedTime) - new Date(a.modifiedTime));
   return data.files[0].id;
@@ -650,16 +684,56 @@ function levenshtein(a, b){
   return dp[m][n];
 }
 
-function render(items){
+function render(items, isAggregate){
   const totalRevenue = items.reduce((s,i)=>s+i.amount,0);
   const orderCount = items.length;
   const pending = items.filter(i => i.owed > 0);
   const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
 
   document.getElementById('totalRevenue').innerHTML = fmtInt(totalRevenue) + '<small>đ</small>';
-  document.getElementById('orderCountSub').textContent = `共 ${orderCount} 筆訂單品項`;
+  document.getElementById('orderCountSub').textContent = isAggregate ? `共 ${orderCount} 筆訂單品項（全部客戶合計）` : `共 ${orderCount} 筆訂單品項`;
   document.getElementById('pendingCount').textContent = pending.length;
   document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 單位`;
+
+  /* ---- 各客戶業績排行（僅在「全部客戶總覽」模式顯示）---- */
+  const customerBreakdownEl = document.getElementById('customerBreakdown');
+  if(isAggregate){
+    const byCustomer = {};
+    items.forEach(i => {
+      const label = i.customerLabel || '未知客戶';
+      if(!byCustomer[label]) byCustomer[label] = { total:0, thisMonth:0 };
+      byCustomer[label].total += i.amount;
+    });
+    const nowRef = new Date();
+    items.forEach(i => {
+      if(i.dateObj && i.dateObj.getFullYear()===nowRef.getFullYear() && i.dateObj.getMonth()===nowRef.getMonth()){
+        const label = i.customerLabel || '未知客戶';
+        byCustomer[label].thisMonth += i.amount;
+      }
+    });
+    const rows = Object.entries(byCustomer).sort((a,b) => b[1].total - a[1].total);
+    customerBreakdownEl.style.display = 'block';
+    customerBreakdownEl.innerHTML = `
+      <div class="section-title">
+        <span class="num">00</span>
+        <h2>各客戶業績排行</h2>
+        <span class="count">${rows.length} 家</span>
+      </div>
+      <div class="ledger">
+        ${rows.map(([label, v]) => `
+          <div class="ledger-row">
+            <div><div class="r-name">${escapeHtml(label)}</div></div>
+            <div class="r-qty">${fmtInt(v.total)} đ</div>
+            <div class="chop done">本月 ${fmtInt(v.thisMonth)} đ</div>
+            <div class="r-date"></div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } else {
+    customerBreakdownEl.style.display = 'none';
+    customerBreakdownEl.innerHTML = '';
+  }
 
   /* ---- 業績週期比較：日曆制 vs 移動天數制 ---- */
   const today = new Date();
@@ -937,7 +1011,28 @@ function render(items){
       }))
       .sort((a,b) => a.severity - b.severity);
 
+    // ---- 用量異常增加：近30天明顯高於平常步調，可能要提前備貨或留意大單 ----
+    const surgeItems = products
+      .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.t30.dir === 'up')
+      .sort((a,b) => b.t30.pct - a.t30.pct);
+
     let watchHtml = '';
+    if(surgeItems.length > 0){
+      watchHtml += `
+        <div class="watchlist-block" style="border-color:var(--jade); border-left-color:var(--jade);">
+          <div class="watchlist-title" style="color:var(--jade);">📈 用量異常增加（${surgeItems.length}）</div>
+          ${surgeItems.map(p => `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                </div>
+                <div class="w-tag" style="color:var(--jade);">▲ 較平常增加 ${Math.abs(p.t30.pct).toFixed(0)}%</div>
+              </div>
+            `).join('')}
+        </div>
+      `;
+    }
     if(watchItems.length > 0){
       watchHtml += `
         <div class="watchlist-block">
