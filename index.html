@@ -48,14 +48,7 @@
   }
   #gate .mark{
     width:64px; height:64px;
-    border:2px solid var(--seal);
-    border-radius:50%;
     display:flex; align-items:center; justify-content:center;
-    color:var(--seal);
-    font-size:26px; font-weight:900;
-    font-family:'Noto Serif TC', serif;
-    transform:rotate(-8deg);
-    opacity:0.9;
   }
   #gate h1{
     font-family:'Noto Serif TC', serif;
@@ -317,7 +310,16 @@
 
 <!-- 登入畫面 -->
 <div id="gate">
-  <div class="mark">力</div>
+  <div class="mark">
+    <svg viewBox="0 0 100 100" width="46" height="46">
+      <g>
+        <path d="M50,50 L50,22 Q50,15 43,15 L24,15 Q17,15 17,22 L17,32 Q17,39 24,39 L38,39 Q44,39 44,45 Z" fill="#3A6EA5"/>
+        <path d="M50,50 L78,50 Q85,50 85,43 L85,24 Q85,17 78,17 L68,17 Q61,17 61,24 L61,38 Q61,44 55,44 Z" fill="#5BA75E"/>
+        <path d="M50,50 L50,78 Q50,85 57,85 L76,85 Q83,85 83,78 L83,68 Q83,61 76,61 L62,61 Q56,61 56,55 Z" fill="#E8A23A"/>
+        <path d="M50,50 L22,50 Q15,50 15,57 L15,76 Q15,83 22,83 L32,83 Q39,83 39,76 L39,62 Q39,56 45,56 Z" fill="#D3555B"/>
+      </g>
+    </svg>
+  </div>
   <h1>訂單儀表板</h1>
   <p>用你獲授權的 Google 帳號登入，即可查看即時業績與出貨狀態。資料僅顯示於你的畫面，不會外流。</p>
   <button id="loginBtn">用 Google 帳號登入查看</button>
