@@ -84,6 +84,7 @@
   }
   header.top .brand-cn{ font-family:'Noto Serif TC',serif; font-size:22px; font-weight:700; }
   header.top .brand-vn{ font-size:11px; color:var(--ink-dim); letter-spacing:0.12em; margin-top:2px; }
+  .data-range{ font-size:11px; color:var(--brass); margin-top:4px; }
   .customer-select{
     background:var(--surface); color:var(--ink);
     border:1px solid var(--line); border-radius:2px;
@@ -311,14 +312,7 @@
 <!-- 登入畫面 -->
 <div id="gate">
   <div class="mark">
-    <svg viewBox="0 0 100 100" width="46" height="46">
-      <g>
-        <path d="M50,50 L50,22 Q50,15 43,15 L24,15 Q17,15 17,22 L17,32 Q17,39 24,39 L38,39 Q44,39 44,45 Z" fill="#3A6EA5"/>
-        <path d="M50,50 L78,50 Q85,50 85,43 L85,24 Q85,17 78,17 L68,17 Q61,17 61,24 L61,38 Q61,44 55,44 Z" fill="#5BA75E"/>
-        <path d="M50,50 L50,78 Q50,85 57,85 L76,85 Q83,85 83,78 L83,68 Q83,61 76,61 L62,61 Q56,61 56,55 Z" fill="#E8A23A"/>
-        <path d="M50,50 L22,50 Q15,50 15,57 L15,76 Q15,83 22,83 L32,83 Q39,83 39,76 L39,62 Q39,56 45,56 Z" fill="#D3555B"/>
-      </g>
-    </svg>
+    <img src="logo.jpg" alt="LOOP POWER" style="width:80px; height:auto; display:block;">
   </div>
   <h1>訂單儀表板</h1>
   <p>用你獲授權的 Google 帳號登入，即可查看即時業績與出貨狀態。資料僅顯示於你的畫面，不會外流。</p>
@@ -332,6 +326,7 @@
     <div>
       <div class="brand-cn" id="brandCn">得力 DELICACY</div>
       <div class="brand-vn" id="brandVn">ĐƠN HÀNG DELICACY · 訂單儀表板</div>
+      <div class="data-range" id="dataRange"></div>
       <select class="customer-select" id="customerSelect" onchange="switchCustomer(this.value)"></select>
     </div>
     <div class="updated"><span class="dot">●</span> 已同步最新資料</div>
@@ -510,6 +505,18 @@ function populateCustomerSelect(){
   const sel = document.getElementById('customerSelect');
   sel.innerHTML = CUSTOMERS.map((c,i) => `<option value="${i}">${escapeHtml(c.label)}</option>`).join('');
   sel.value = 1;
+}
+
+/* 依「各客戶業績排行」的順序，重新排列選單的顯示順序（value 仍對應 CUSTOMERS 原始索引，不影響其他邏輯） */
+function reorderCustomerSelect(sortedLabels){
+  const sel = document.getElementById('customerSelect');
+  const currentValue = sel.value;
+  const aggregateIdx = CUSTOMERS.findIndex(c => c.isAggregate);
+  const labelToIdx = {};
+  CUSTOMERS.forEach((c,i) => { labelToIdx[c.label] = i; });
+  const orderedIdx = [aggregateIdx, ...sortedLabels.map(l => labelToIdx[l]).filter(i => i !== undefined)];
+  sel.innerHTML = orderedIdx.map(i => `<option value="${i}">${escapeHtml(CUSTOMERS[i].label)}</option>`).join('');
+  sel.value = currentValue;
 }
 
 function switchCustomer(indexStr){
@@ -744,6 +751,16 @@ function render(items, isAggregate){
   document.getElementById('pendingCount').textContent = pending.length;
   document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 單位`;
 
+  /* ---- 資料涵蓋範圍：顯示最早一筆有日期的訂單，方便判斷資料是不是被搬走了一部分 ---- */
+  const datedItems = items.filter(i => i.dateObj);
+  const dataRangeEl = document.getElementById('dataRange');
+  if(datedItems.length === 0){
+    dataRangeEl.textContent = '';
+  } else {
+    const earliest = datedItems.reduce((min,i) => i.dateObj < min ? i.dateObj : min, datedItems[0].dateObj);
+    dataRangeEl.textContent = `資料涵蓋：${earliest.getFullYear()}年${earliest.getMonth()+1}月起`;
+  }
+
   /* ---- 各客戶業績排行（僅在「全部客戶總覽」模式顯示）---- */
   const customerBreakdownEl = document.getElementById('customerBreakdown');
   if(isAggregate){
@@ -779,6 +796,8 @@ function render(items, isAggregate){
         `).join('')}
       </div>
     `;
+    // 依業績排行的順序，重新排列客戶下拉選單（讓最常用/業績最高的客戶排在前面，方便切換）
+    reorderCustomerSelect(rows.map(([label]) => label));
   } else {
     customerBreakdownEl.style.display = 'none';
     customerBreakdownEl.innerHTML = '';
