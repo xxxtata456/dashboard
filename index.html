@@ -501,22 +501,54 @@ function showError(msg){
   box.textContent = msg;
 }
 
+/* 客戶排序永久保存：存在瀏覽器 localStorage，重開網頁/裝置不會遺失，直到下次跑總覽才會更新 */
+const CUSTOMER_ORDER_KEY = 'dashboard_customerOrder_v1';
+
+function saveCustomerOrder(sortedLabels){
+  try{ localStorage.setItem(CUSTOMER_ORDER_KEY, JSON.stringify(sortedLabels)); }catch(e){ console.warn('無法儲存客戶排序', e); }
+}
+
+function loadCustomerOrder(){
+  try{
+    const raw = localStorage.getItem(CUSTOMER_ORDER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+
+/* 依已保存的順序（若有）排列下拉選單，若尚未存過排序則用原始順序 */
 function populateCustomerSelect(){
   const sel = document.getElementById('customerSelect');
-  sel.innerHTML = CUSTOMERS.map((c,i) => `<option value="${i}">${escapeHtml(c.label)}</option>`).join('');
+  const aggregateIdx = CUSTOMERS.findIndex(c => c.isAggregate);
+  const savedOrder = loadCustomerOrder();
+  let orderedIdx;
+  if(savedOrder && savedOrder.length){
+    const labelToIdx = {};
+    CUSTOMERS.forEach((c,i) => { labelToIdx[c.label] = i; });
+    const matchedIdx = savedOrder.map(l => labelToIdx[l]).filter(i => i !== undefined);
+    // 新加入、尚未出現在保存排序裡的客戶，補到最後，避免消失
+    const missingIdx = CUSTOMERS.map((c,i) => i).filter(i => i !== aggregateIdx && !matchedIdx.includes(i));
+    orderedIdx = [aggregateIdx, ...matchedIdx, ...missingIdx];
+  } else {
+    orderedIdx = CUSTOMERS.map((c,i) => i);
+  }
+  sel.innerHTML = orderedIdx.map(i => `<option value="${i}">${escapeHtml(CUSTOMERS[i].label)}</option>`).join('');
   sel.value = 1;
 }
 
-/* 依「各客戶業績排行」的順序，重新排列選單的顯示順序（value 仍對應 CUSTOMERS 原始索引，不影響其他邏輯） */
+/* 依「各客戶業績排行」的順序，重新排列選單的顯示順序（value 仍對應 CUSTOMERS 原始索引，不影響其他邏輯），並永久保存 */
 function reorderCustomerSelect(sortedLabels){
   const sel = document.getElementById('customerSelect');
   const currentValue = sel.value;
   const aggregateIdx = CUSTOMERS.findIndex(c => c.isAggregate);
   const labelToIdx = {};
   CUSTOMERS.forEach((c,i) => { labelToIdx[c.label] = i; });
-  const orderedIdx = [aggregateIdx, ...sortedLabels.map(l => labelToIdx[l]).filter(i => i !== undefined)];
+  const matchedIdx = sortedLabels.map(l => labelToIdx[l]).filter(i => i !== undefined);
+  const missingIdx = CUSTOMERS.map((c,i) => i).filter(i => i !== aggregateIdx && !matchedIdx.includes(i));
+  const orderedIdx = [aggregateIdx, ...matchedIdx, ...missingIdx];
   sel.innerHTML = orderedIdx.map(i => `<option value="${i}">${escapeHtml(CUSTOMERS[i].label)}</option>`).join('');
   sel.value = currentValue;
+  // 保存這次排序，下次開網頁直接套用，不用重新跑總覽
+  saveCustomerOrder(orderedIdx.filter(i => i !== aggregateIdx).map(i => CUSTOMERS[i].label));
 }
 
 function switchCustomer(indexStr){
