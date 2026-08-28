@@ -1217,15 +1217,17 @@ function render(items, isAggregate){
     pendingListEl.innerHTML = '<div class="empty">目前沒有待出貨品項</div>';
   } else {
     pendingListEl.innerHTML = pending
-      .sort((a,b)=>b.owed-a.owed)
-      .map(i => `
+      .map(i => ({ i, stalledDays: i.dateObj ? Math.floor((today - i.dateObj) / 86400000) : null }))
+      // 越久沒出貨的排越下面；沒有日期可判斷的（stalledDays 為 null）視為最新，排最上面
+      .sort((a,b) => (a.stalledDays ?? -1) - (b.stalledDays ?? -1))
+      .map(({i, stalledDays}) => `
         <div class="ledger-row">
           <div>
             <div class="r-name">${escapeHtml(i.name || i.code)}</div>
             <div class="r-code">${escapeHtml(i.code)}</div>
           </div>
           <div class="r-qty">還欠 ${fmtInt(i.owed)}</div>
-          <div class="chop">待出貨</div>
+          <div class="chop">${stalledDays !== null ? `停滯 ${stalledDays} 天` : '待出貨'}</div>
           <div class="r-date">${escapeHtml(i.date)}</div>
         </div>
       `).join('');
