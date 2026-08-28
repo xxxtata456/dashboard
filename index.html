@@ -767,7 +767,6 @@ function levenshtein(a, b){
 }
 
 function render(items, isAggregate){
-  const orderCount = items.length;
   const pending = items.filter(i => i.owed > 0);
   const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
 
@@ -950,7 +949,7 @@ function render(items, isAggregate){
     const trendToggleBtn = document.getElementById('trendToggleBtn');
     trendExpanded = false;
     if(allMonths.length > 6){
-      trendToggleBtn.style.display = '';
+      trendToggleBtn.style.display = 'block';
       trendToggleBtn.textContent = '顯示更早的月份 ▾';
     } else {
       trendToggleBtn.style.display = 'none';
