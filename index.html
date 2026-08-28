@@ -299,6 +299,13 @@
   }
   .reload:hover{ border-color:var(--brass); color:var(--brass); }
 
+  .trend-toggle{
+    display:none; width:100%; margin-top:10px;
+    background:transparent; border:1px solid var(--line); color:var(--ink-dim);
+    padding:9px 18px; font-size:12px; border-radius:var(--radius); cursor:pointer;
+  }
+  .trend-toggle:hover{ border-color:var(--brass); color:var(--brass); }
+
   #errBox{
     display:none;
     background:var(--surface-2); border:1px solid var(--seal-dim);
@@ -334,13 +341,8 @@
 
   <div id="errBox"></div>
 
-  <div class="hero">
+  <div class="hero" style="grid-template-columns:1fr;">
     <div class="hero-card primary">
-      <div class="hero-label">累計訂單金額</div>
-      <div class="hero-number mono" id="totalRevenue">—</div>
-      <div class="hero-sub" id="orderCountSub">—</div>
-    </div>
-    <div class="hero-card secondary">
       <div class="hero-label">本月業績</div>
       <div class="hero-number mono" id="monthRevenue">—</div>
       <div class="hero-sub" id="momSub">—</div>
@@ -392,15 +394,7 @@
     <div class="ledger" id="trendList">
       <div class="empty">讀取中…</div>
     </div>
-
-    <div class="section-title">
-      <span class="num">04</span>
-      <h2>近期訂單</h2>
-      <span class="count" id="recentListCount"></span>
-    </div>
-    <div class="ledger" id="recentList">
-      <div class="empty">讀取中…</div>
-    </div>
+    <button class="trend-toggle" id="trendToggleBtn" onclick="toggleTrendHistory()">顯示更早的月份 ▾</button>
   </div>
 
   <!-- ===== 訂單產品數量分頁 ===== -->
@@ -773,15 +767,12 @@ function levenshtein(a, b){
 }
 
 function render(items, isAggregate){
-  const totalRevenue = items.reduce((s,i)=>s+i.amount,0);
   const orderCount = items.length;
   const pending = items.filter(i => i.owed > 0);
   const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
 
-  document.getElementById('totalRevenue').innerHTML = fmtInt(totalRevenue) + '<small>đ</small>';
-  document.getElementById('orderCountSub').textContent = isAggregate ? `共 ${orderCount} 筆訂單品項（全部客戶合計）` : `共 ${orderCount} 筆訂單品項`;
   document.getElementById('pendingCount').textContent = pending.length;
-  document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 單位`;
+  document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 公斤`;
 
   /* ---- 資料涵蓋範圍：顯示最早一筆有日期的訂單，方便判斷資料是不是被搬走了一部分 ---- */
   const datedItems = items.filter(i => i.dateObj);
@@ -919,9 +910,9 @@ function render(items, isAggregate){
   } else {
     const maxAmount = Math.max(...monthKeys.map(k => monthMap[k]));
 
-    // 顯示最近 6 個月，由新到舊
-    const recentMonths = monthKeys.slice(-6).reverse();
-    trendListEl.innerHTML = recentMonths.map((key, idx) => {
+    // 由新到舊全部渲染，超過 6 個月的部分先隱藏，靠「顯示更早的月份」按鈕展開
+    const allMonths = monthKeys.slice().reverse();
+    trendListEl.innerHTML = allMonths.map((key, idx) => {
       const amt = monthMap[key];
       const barPct = maxAmount > 0 ? Math.max(4, Math.round(amt / maxAmount * 100)) : 0;
       const prevIdx = monthKeys.indexOf(key) - 1;
@@ -947,7 +938,7 @@ function render(items, isAggregate){
         yoyHtmlRow = `<span class="t-yoy ${dir2}">去年同月 ${arrow2}${Math.abs(p2).toFixed(0)}%</span>`;
       }
       return `
-        <div class="trend-row ${idx===0 ? 'is-current' : ''}">
+        <div class="trend-row ${idx===0 ? 'is-current' : ''} ${idx>=6 ? 'trend-extra' : ''}" ${idx>=6 ? 'style="display:none;"' : ''}>
           <div class="t-month">${monthLabel(key)}</div>
           <div class="t-bar-track"><div class="t-bar-fill" style="width:${barPct}%"></div></div>
           <div class="t-amount">${fmtInt(amt)} đ</div>
@@ -955,6 +946,15 @@ function render(items, isAggregate){
         </div>
       `;
     }).join('');
+
+    const trendToggleBtn = document.getElementById('trendToggleBtn');
+    trendExpanded = false;
+    if(allMonths.length > 6){
+      trendToggleBtn.style.display = '';
+      trendToggleBtn.textContent = '顯示更早的月份 ▾';
+    } else {
+      trendToggleBtn.style.display = 'none';
+    }
   }
 
   /* ---- 產品備貨分析：依產品分類彙整全期月均、近7天、近30天動態 ---- */
@@ -1100,10 +1100,12 @@ function render(items, isAggregate){
 
     // ---- 需留意品項：過去下單很規律，但近30天突然沒下單，或用量明顯下降 ----
     // 「無下單」才需要排除還有待出貨（owed>0）的品項（因為那代表其實有下單只是我們沒出貨）；「用量下降」則不受欠貨影響，一律列出
+    // 注意：recent30Qty===0 時 t30.dir 幾乎必定是 down（0 對比預期量＝-100%），所以要用 if/else 分開判斷，
+    // 避免「無下單但有欠貨」的品項從「用量下降」這條路徑漏進來，跟排除設定互相矛盾
     const REGULARITY_THRESHOLD = 0.6; // 活躍期間內至少6成月份都有下單，才算「規律」
     const watchItems = products
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && (
-        (p.recent30Qty === 0 && p.owed === 0) || p.t30.dir === 'down'
+        p.recent30Qty === 0 ? p.owed === 0 : p.t30.dir === 'down'
       ))
       .map(p => ({
         p,
@@ -1230,24 +1232,16 @@ function render(items, isAggregate){
       `).join('');
   }
 
-  const recentListEl = document.getElementById('recentList');
-  const recent = items.slice(-15).reverse();
-  document.getElementById('recentListCount').textContent = `最近 ${recent.length} 筆`;
-  if(recent.length === 0){
-    recentListEl.innerHTML = '<div class="empty">尚無訂單資料</div>';
-  } else {
-    recentListEl.innerHTML = recent.map(i => `
-      <div class="ledger-row">
-        <div>
-          <div class="r-name">${escapeHtml(i.name || i.code)}</div>
-          <div class="r-code">${escapeHtml(i.code)}</div>
-        </div>
-        <div class="r-qty" style="${i.priceMissing ? 'color:var(--seal);' : ''}">${i.priceMissing ? `缺單價（數量 ${fmtInt(i.qty)}）` : fmtInt(i.amount) + ' đ'}</div>
-        <div class="chop ${i.owed>0 ? '' : 'done'}">${i.owed>0 ? '待出貨' : '已結清'}</div>
-        <div class="r-date">${escapeHtml(i.date)}</div>
-      </div>
-    `).join('');
-  }
+}
+
+let trendExpanded = false;
+function toggleTrendHistory(){
+  trendExpanded = !trendExpanded;
+  document.querySelectorAll('#trendList .trend-extra').forEach(el => {
+    el.style.display = trendExpanded ? '' : 'none';
+  });
+  const btn = document.getElementById('trendToggleBtn');
+  if(btn) btn.textContent = trendExpanded ? '收合 ▴' : '顯示更早的月份 ▾';
 }
 
 function escapeHtml(s){
