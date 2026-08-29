@@ -592,9 +592,10 @@ async function loadData(){
     const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
-    const parsed = parseLedger(rows);
-    parsed.forEach(it => it.customerLabel = currentCustomer.label);
-    render(parsed, false);
+    const { orders, shipments } = parseLedger(rows);
+    orders.forEach(it => it.customerLabel = currentCustomer.label);
+    shipments.forEach(it => it.customerLabel = currentCustomer.label);
+    render(shipments, orders, false);
   } catch(err){
     console.error(err);
     showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + currentCustomer.query + '」，且你的 Google 帳號有檢視權限。');
@@ -603,7 +604,8 @@ async function loadData(){
 
 async function loadAllCustomers(){
   const realCustomers = CUSTOMERS.filter(c => !c.isAggregate);
-  const allItems = [];
+  const allOrders = [];
+  const allShipments = [];
   const failed = [];
   for(const c of realCustomers){
     try{
@@ -613,9 +615,11 @@ async function loadAllCustomers(){
       const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
-      const parsed = parseLedger(rows);
-      parsed.forEach(it => it.customerLabel = c.label);
-      allItems.push(...parsed);
+      const { orders, shipments } = parseLedger(rows);
+      orders.forEach(it => it.customerLabel = c.label);
+      shipments.forEach(it => it.customerLabel = c.label);
+      allOrders.push(...orders);
+      allShipments.push(...shipments);
     } catch(err){
       console.error(c.label, err);
       failed.push(c.label);
@@ -624,7 +628,7 @@ async function loadAllCustomers(){
   if(failed.length > 0){
     showError('以下客戶讀取失敗，總覽數字不包含這些客戶：\n' + failed.join('、'));
   }
-  render(allItems, true);
+  render(allShipments, allOrders, true);
 }
 
 async function findFile(query){
@@ -655,7 +659,13 @@ async function downloadFile(fileId){
   return await res.arrayBuffer();
 }
 
-/* 解析帳本：自動找標題列，再依關鍵字比對欄位 */
+/* 解析帳本：自動找標題列，再依關鍵字比對欄位。
+   表格結構：每一列是一筆訂單（訂單日期／訂數量／還欠），
+   分隔線「////////」之後，每一欄的表頭是一個出貨日期，欄位裡的數字就是那天出的貨量
+   （同一筆訂單可能分好幾次出貨，分散在好幾個出貨日期欄位）。
+   回傳 { orders, shipments }：
+   - orders：訂單本身，只用在「待出貨清單」跟「還欠」判斷（維持看訂單，不受本次調整影響）
+   - shipments：拆開後的每一筆實際出貨紀錄，業績／用量／月度走勢都改用這個計算 */
 function parseLedger(rows){
   let headerRowIdx = -1;
   let headerRow = null;
@@ -683,8 +693,21 @@ function parseLedger(rows){
   const colPrice  = findCol(['GIA','單價']);
   const colQty    = findCol(['SLĐ','訂數量']);
   const colOwed   = findCol(['nợ','還欠']);
+  const colDivider = headerRow.findIndex(c => c.includes('////////'));
 
-  const items = [];
+  // 出貨欄位：分隔線之後、表頭能解析成日期的欄位，每一欄代表一個出貨日
+  const shipCols = [];
+  if(colDivider >= 0){
+    for(let c = colDivider+1; c < headerRow.length; c++){
+      const d = toDateObj(headerRow[c]);
+      if(d){
+        shipCols.push({ idx:c, dateObj:d, monthKey:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, dateStr: fmtDateShort(d) });
+      }
+    }
+  }
+
+  const orders = [];
+  const shipments = [];
   for(let i=headerRowIdx+1;i<rows.length;i++){
     const row = rows[i];
     const code = colCode>=0 ? String(row[colCode]||'').trim() : '';
@@ -703,9 +726,26 @@ function parseLedger(rows){
     const monthKey = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}` : null;
     const date = dateObj ? fmtDateShort(dateObj) : String(rawDate||'').trim();
     const priceMissing = qty > 0 && price === 0;
-    items.push({ code, name, price, qty, owed, date, monthKey, dateObj, amount: price*qty, priceMissing });
+
+    orders.push({ code, name, price, qty, owed, date, monthKey, dateObj, priceMissing });
+
+    for(const sc of shipCols){
+      const raw = row[sc.idx];
+      if(raw === '' || raw === null || raw === undefined) continue;
+      const shipQty = parseFloat(String(raw).replace(/,/g,''));
+      if(!shipQty || shipQty <= 0) continue;
+      shipments.push({
+        code, name, price,
+        qty: shipQty,
+        amount: price * shipQty,
+        date: sc.dateStr,
+        dateObj: sc.dateObj,
+        monthKey: sc.monthKey,
+        priceMissing
+      });
+    }
   }
-  return items;
+  return { orders, shipments };
 }
 
 /* 將儲存格原始值（可能是 Date 物件／Excel 序號／文字字串）統一轉成 Date 物件，失敗回傳 null */
@@ -719,9 +759,11 @@ function toDateObj(raw){
     return isNaN(d) ? null : d;
   }
   const str = String(raw).trim();
-  const m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
+  const m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
   if(!m) return null;
-  const day = parseInt(m[1],10), mon = parseInt(m[2],10), yr = parseInt(m[3],10);
+  const day = parseInt(m[1],10), mon = parseInt(m[2],10);
+  let yr = parseInt(m[3],10);
+  if(yr < 100) yr += 2000; // 兩位數年份（例如 25 → 2025）
   if(mon < 1 || mon > 12 || day < 1 || day > 31) return null;
   return new Date(yr, mon-1, day);
 }
@@ -766,15 +808,15 @@ function levenshtein(a, b){
   return dp[m][n];
 }
 
-function render(items, isAggregate){
-  const pending = items.filter(i => i.owed > 0);
+function render(shipments, orders, isAggregate){
+  const pending = orders.filter(i => i.owed > 0);
   const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
 
   document.getElementById('pendingCount').textContent = pending.length;
   document.getElementById('pendingQtySub').textContent = `合計還欠 ${fmtInt(pendingQty)} 公斤`;
 
-  /* ---- 資料涵蓋範圍：顯示最早一筆有日期的訂單，方便判斷資料是不是被搬走了一部分 ---- */
-  const datedItems = items.filter(i => i.dateObj);
+  /* ---- 資料涵蓋範圍：顯示最早一筆有日期的出貨紀錄，方便判斷資料是不是被搬走了一部分 ---- */
+  const datedItems = shipments.filter(i => i.dateObj);
   const dataRangeEl = document.getElementById('dataRange');
   if(datedItems.length === 0){
     dataRangeEl.textContent = '';
@@ -787,13 +829,13 @@ function render(items, isAggregate){
   const customerBreakdownEl = document.getElementById('customerBreakdown');
   if(isAggregate){
     const byCustomer = {};
-    items.forEach(i => {
+    shipments.forEach(i => {
       const label = i.customerLabel || '未知客戶';
       if(!byCustomer[label]) byCustomer[label] = { total:0, thisMonth:0 };
       byCustomer[label].total += i.amount;
     });
     const nowRef = new Date();
-    items.forEach(i => {
+    shipments.forEach(i => {
       if(i.dateObj && i.dateObj.getFullYear()===nowRef.getFullYear() && i.dateObj.getMonth()===nowRef.getMonth()){
         const label = i.customerLabel || '未知客戶';
         byCustomer[label].thisMonth += i.amount;
@@ -825,10 +867,10 @@ function render(items, isAggregate){
     customerBreakdownEl.innerHTML = '';
   }
 
-  /* ---- 業績週期比較：日曆制 vs 移動天數制 ---- */
+  /* ---- 業績週期比較：日曆制 vs 移動天數制（以出貨為準）---- */
   const today = new Date();
   today.setHours(23,59,59,999);
-  const withDate = items.filter(i => i.dateObj);
+  const withDate = shipments.filter(i => i.dateObj);
 
   // 日曆制：本月／本季／本年
   const curY = today.getFullYear(), curM = today.getMonth(); // 0-based
@@ -894,9 +936,9 @@ function render(items, isAggregate){
     document.getElementById('momSub').textContent = '本月尚無訂單資料';
   }
 
-  /* ---- 月度業績走勢 ---- */
+  /* ---- 月度業績走勢（以出貨月份計算）---- */
   const monthMap = {};
-  items.forEach(i => {
+  shipments.forEach(i => {
     if(!i.monthKey) return;
     monthMap[i.monthKey] = (monthMap[i.monthKey] || 0) + i.amount;
   });
@@ -956,32 +998,44 @@ function render(items, isAggregate){
     }
   }
 
-  /* ---- 產品備貨分析：依產品分類彙整全期月均、近7天、近30天動態 ---- */
+  /* ---- 產品備貨分析：依產品分類彙整全期月均、近7天、近30天動態（以出貨為準） ---- */
   const productMap = {};
+  const getPM = (code, name) => {
+    const key = code || name;
+    if(!key) return null;
+    if(!productMap[key]) productMap[key] = { code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0, latestPrice:0, latestPriceDate:null, orderCount:0, firstDate:null, lastDate:null };
+    return productMap[key];
+  };
+  const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
+  const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
+  // 用量／全期月均／近7天／近30天／目前單價：全部以「實際出貨」計算
   withDate.forEach(i => {
-    const key = i.code || i.name;
-    if(!key) return;
-    if(!productMap[key]) productMap[key] = { code:i.code, name:i.name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0, latestPrice:0, latestPriceDate:null, orderCount:0, firstDate:null, lastDate:null };
-    const pm = productMap[key];
+    const pm = getPM(i.code, i.name);
+    if(!pm) return;
     pm.totalQty += i.qty;
-    pm.owed += i.owed;
     pm.months.add(i.monthKey);
-    pm.orderCount += 1;
     if(!pm.firstDate || i.dateObj < pm.firstDate) pm.firstDate = i.dateObj;
     if(!pm.lastDate || i.dateObj > pm.lastDate) pm.lastDate = i.dateObj;
-    const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
-    const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) pm.recent7Qty += i.qty;
     if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recent30Qty += i.qty;
-    // 追蹤該產品「最新一筆有填單價」的訂單，作為目前單價參考
+    // 追蹤該產品「最新一筆有填單價」的出貨，作為目前單價參考
     if(i.price > 0 && (!pm.latestPriceDate || i.dateObj > pm.latestPriceDate)){
       pm.latestPrice = i.price;
       pm.latestPriceDate = i.dateObj;
     }
   });
+  // 還欠數量／訂單筆數：維持看訂單本身（跟出貨無關，這部分邏輯不變）
+  orders.forEach(i => {
+    const pm = getPM(i.code, i.name);
+    if(!pm) return;
+    pm.owed += i.owed;
+    pm.orderCount += 1;
+  });
 
   /* ---- 自動合併疑似誤植的代碼：比對「品名／代碼／單價」三項，符合2項以上視為同一產品 ---- */
-  let rawProducts = Object.values(productMap);
+  // 只保留有實際出貨紀錄的產品才進行用量分析（純訂單、還沒出過貨的產品沒有可分析的用量趨勢，
+  // 但還是會透過「待出貨清單」單獨呈現，不會遺漏）
+  let rawProducts = Object.values(productMap).filter(p => p.firstDate && p.lastDate);
   const normName = (n) => String(n||'').trim().toUpperCase().replace(/\s+/g,' ');
   const parent = rawProducts.map((_,i) => i);
   function find(x){ while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
