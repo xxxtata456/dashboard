@@ -1190,9 +1190,9 @@ function render(shipments, orders, isAggregate){
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.recent30Qty > 0 && p.t30.dir === 'down')
       .sort((a,b) => a.t30.pct - b.t30.pct);
 
-    // ---- 近30天無下單：過去下單很規律，但近30天完全沒有新訂單。跟出貨狀況無關，是客戶「下單行為」本身的訊號 ----
+    // ---- 近30天無下單：過去下單很規律，但近30天完全沒有新訂單。排除還有欠貨在途的（欠單還沒出清，客戶本來就不會急著下新單，屬於正常）----
     const noOrderItems = products
-      .filter(p => p.orderActiveSpanMonths >= 3 && p.orderRegularity >= REGULARITY_THRESHOLD && p.recentOrder30Qty === 0)
+      .filter(p => p.orderActiveSpanMonths >= 3 && p.orderRegularity >= REGULARITY_THRESHOLD && p.recentOrder30Qty === 0 && p.owed === 0)
       .sort((a,b) => b.daysSinceLastOrder - a.daysSinceLastOrder);
 
     // ---- 用量異常增加：近30天明顯高於平常步調，可能要提前備貨或留意大單 ----
