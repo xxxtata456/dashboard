@@ -1117,7 +1117,7 @@ function render(shipments, orders, isAggregate){
   for(let i=0;i<rawProducts.length;i++){
     for(let j=i+1;j<rawProducts.length;j++){
       const a = rawProducts[i], b = rawProducts[j];
-      if(a.code === b.code) continue;
+      if(a.code && b.code && a.code === b.code) continue; // 代碼都有填且完全相同才跳過；兩邊代碼都空白時不能算「相同」，要繼續往下比對品名
       const nameMatch = normName(a.name) === normName(b.name) && normName(a.name) !== '';
       const codeMatch = a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對
       const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && a.latestPrice === b.latestPrice; // 完全相等，不做容許誤差
@@ -1138,8 +1138,15 @@ function render(shipments, orders, isAggregate){
   const mergeLog = []; // 記錄自動合併的動作，供透明化顯示
   rawProducts = Object.values(mergeGroups).map(group => {
     if(group.length === 1) return group[0];
-    // 以「訂單筆數最多」的那個視為正確代碼，其餘合併進去
+    // 以「訂單筆數最多」的那個視為正確代碼，其餘合併進去；
+    // 但如果同組裡有品名是「bs」結尾的版本，優先當作正確版本——bs結尾代表目前仍在使用的正確品名，
+    // 就算歷史訂單筆數比較少（例如改版沒多久），也不該被舊名稱吃掉
     group.sort((a,b) => b.orderCount - a.orderCount);
+    const bsIdx = group.findIndex(p => /\sbs$/i.test(String(p.name||'').trim()));
+    if(bsIdx > 0){
+      const [bsItem] = group.splice(bsIdx, 1);
+      group.unshift(bsItem);
+    }
     const canonical = group[0];
     const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), customerLabels:new Set(canonical.customerLabels) };
     for(let k=1;k<group.length;k++){
