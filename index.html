@@ -93,6 +93,12 @@
   }
   header.top .updated{ font-size:11px; color:var(--ink-dim); text-align:right; }
   header.top .updated .dot{ color:var(--jade); }
+  header.top .updated .spinner{
+    display:inline-block; width:9px; height:9px; margin-right:2px;
+    border:2px solid var(--line); border-top-color:var(--brass);
+    border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
 
   /* Hero numbers */
   .hero{
@@ -336,7 +342,7 @@
       <div class="data-range" id="dataRange"></div>
       <select class="customer-select" id="customerSelect" onchange="switchCustomer(this.value)"></select>
     </div>
-    <div class="updated"><span class="dot">●</span> 已同步最新資料</div>
+    <div class="updated" id="syncStatus"><span class="dot">●</span> 已同步最新資料</div>
   </header>
 
   <div id="errBox"></div>
@@ -495,6 +501,18 @@ function showError(msg){
   box.textContent = msg;
 }
 
+/* 讀取狀態指示：loading=轉圈中／done=已完成（綠點）／error=讀取失敗（紅點） */
+function setSyncStatus(state, label){
+  const el = document.getElementById('syncStatus');
+  if(state === 'loading'){
+    el.innerHTML = `<span class="spinner"></span> ${escapeHtml(label || '讀取中…')}`;
+  } else if(state === 'error'){
+    el.innerHTML = `<span class="dot" style="color:var(--seal);">●</span> ${escapeHtml(label || '讀取失敗')}`;
+  } else {
+    el.innerHTML = `<span class="dot">●</span> ${escapeHtml(label || '已同步最新資料')}`;
+  }
+}
+
 /* 客戶排序永久保存：存在瀏覽器 localStorage，重開網頁/裝置不會遺失，直到下次跑總覽才會更新 */
 const CUSTOMER_ORDER_KEY = 'dashboard_customerOrder_v1';
 
@@ -585,6 +603,7 @@ async function loadData(){
     await loadAllCustomers();
     return;
   }
+  setSyncStatus('loading', '讀取中…');
   try{
     const fileId = await findFile(currentCustomer.query);
     const buf = await downloadFile(fileId);
@@ -596,8 +615,10 @@ async function loadData(){
     orders.forEach(it => it.customerLabel = currentCustomer.label);
     shipments.forEach(it => it.customerLabel = currentCustomer.label);
     render(shipments, orders, false);
+    setSyncStatus('done', '資料已讀取完畢');
   } catch(err){
     console.error(err);
+    setSyncStatus('error', '讀取失敗');
     showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + currentCustomer.query + '」，且你的 Google 帳號有檢視權限。');
   }
 }
@@ -607,7 +628,9 @@ async function loadAllCustomers(){
   const allOrders = [];
   const allShipments = [];
   const failed = [];
-  for(const c of realCustomers){
+  for(let idx=0; idx<realCustomers.length; idx++){
+    const c = realCustomers[idx];
+    setSyncStatus('loading', `讀取中…（${idx+1}/${realCustomers.length}）${c.label}`);
     try{
       const fileId = await findFile(c.query);
       const buf = await downloadFile(fileId);
@@ -629,6 +652,7 @@ async function loadAllCustomers(){
     showError('以下客戶讀取失敗，總覽數字不包含這些客戶：\n' + failed.join('、'));
   }
   render(allShipments, allOrders, true);
+  setSyncStatus(failed.length > 0 ? 'error' : 'done', failed.length > 0 ? `資料已讀取完畢（${failed.length} 家失敗）` : '全部客戶資料已讀取完畢');
 }
 
 async function findFile(query){
@@ -1178,25 +1202,33 @@ function render(shipments, orders, isAggregate){
       }
     });
 
+    // ---- 超過一年無下單、也無出貨：視為可能已停用的產品，移出主要清單，改列入「待人工確認是否下架」區塊，讓其他清單/表格保持乾淨 ----
+    const DORMANT_DAYS = 365;
+    const dormantItems = products.filter(p =>
+      p.daysSinceLastOrder !== null && p.daysSinceLastOrder > DORMANT_DAYS && p.daysSinceLastShip > DORMANT_DAYS
+    ).sort((a,b) => Math.max(b.daysSinceLastOrder,b.daysSinceLastShip) - Math.max(a.daysSinceLastOrder,a.daysSinceLastShip));
+    const dormantKeys = new Set(dormantItems.map(p => p.code || p.name));
+    const activeProducts = products.filter(p => !dormantKeys.has(p.code || p.name));
+
     const REGULARITY_THRESHOLD = 0.6; // 活躍期間內至少6成月份都有紀錄，才算「規律」
 
     // ---- 近30天無出貨：過去出貨很規律，但近30天完全沒出貨。排除還有欠貨在途的（那是「待出貨清單」在追蹤的範圍，這裡不重複通報）----
-    const noShipmentItems = products
+    const noShipmentItems = activeProducts
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.recent30Qty === 0 && p.owed === 0)
       .sort((a,b) => b.daysSinceLastShip - a.daysSinceLastShip);
 
     // ---- 出貨量下降：近30天有出貨，但明顯低於平常步調 ----
-    const declineItems = products
+    const declineItems = activeProducts
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.recent30Qty > 0 && p.t30.dir === 'down')
       .sort((a,b) => a.t30.pct - b.t30.pct);
 
     // ---- 近30天無下單：過去下單很規律，但近30天完全沒有新訂單。排除還有欠貨在途的（欠單還沒出清，客戶本來就不會急著下新單，屬於正常）----
-    const noOrderItems = products
+    const noOrderItems = activeProducts
       .filter(p => p.orderActiveSpanMonths >= 3 && p.orderRegularity >= REGULARITY_THRESHOLD && p.recentOrder30Qty === 0 && p.owed === 0)
       .sort((a,b) => b.daysSinceLastOrder - a.daysSinceLastOrder);
 
     // ---- 用量異常增加：近30天明顯高於平常步調，可能要提前備貨或留意大單 ----
-    const surgeItems = products
+    const surgeItems = activeProducts
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.t30.dir === 'up')
       .sort((a,b) => b.t30.pct - a.t30.pct);
 
@@ -1265,6 +1297,22 @@ function render(shipments, orders, isAggregate){
         </div>
       `;
     }
+    if(dormantItems.length > 0){
+      watchHtml += `
+        <div class="watchlist-block" style="border-color:var(--ink-dim); border-left-color:var(--ink-dim);">
+          <div class="watchlist-title" style="color:var(--ink-dim);">🗄 超過一年無下單無出貨，待人工確認是否下架（${dormantItems.length}）</div>
+          ${dormantItems.map(p => `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                </div>
+                <div class="w-tag" style="color:var(--ink-dim);">已 ${p.daysSinceLastOrder} 天沒下單 · ${p.daysSinceLastShip} 天沒出貨</div>
+              </div>
+            `).join('')}
+        </div>
+      `;
+    }
     if(mergeLog.length > 0){
       watchHtml += `
         <div class="watchlist-block">
@@ -1283,8 +1331,9 @@ function render(shipments, orders, isAggregate){
     }
     watchlistEl.innerHTML = watchHtml;
 
+    document.getElementById('stockListCount').textContent = activeProducts.length + ' 項';
     const grouped = {};
-    products.forEach(p => {
+    activeProducts.forEach(p => {
       const cat = categorize(p.name);
       if(!grouped[cat]) grouped[cat] = [];
       grouped[cat].push(p);
