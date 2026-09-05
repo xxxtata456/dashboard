@@ -305,6 +305,12 @@
   }
   .reload:hover{ border-color:var(--brass); color:var(--brass); }
 
+  .delist-btn{
+    background:transparent; border:1px solid var(--line); color:var(--ink-dim);
+    padding:5px 10px; font-size:11px; border-radius:6px; cursor:pointer; white-space:nowrap;
+  }
+  .delist-btn:hover{ border-color:var(--seal); color:var(--seal); }
+
   .trend-toggle{
     display:none; width:100%; margin-top:10px;
     background:transparent; border:1px solid var(--line); color:var(--ink-dim);
@@ -525,6 +531,35 @@ function loadCustomerOrder(){
     const raw = localStorage.getItem(CUSTOMER_ORDER_KEY);
     return raw ? JSON.parse(raw) : null;
   }catch(e){ return null; }
+}
+
+/* 已下架產品清單：使用者在「待人工確認是否下架」區塊按下確認後，永久記住不再顯示於產品分析
+   key 格式為「客戶名稱::代碼或品名」，因為彙整總覽模式會把不同客戶的產品混在一起分析，要用客戶名稱區分 */
+const DELISTED_KEY = 'dashboard_delisted_v1';
+
+function loadDelistedSet(){
+  try{
+    const raw = localStorage.getItem(DELISTED_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  }catch(e){ return new Set(); }
+}
+
+function saveDelistedSet(set){
+  try{ localStorage.setItem(DELISTED_KEY, JSON.stringify(Array.from(set))); }catch(e){ console.warn('無法儲存下架清單', e); }
+}
+
+// 目前畫面上「待人工確認是否下架」清單的暫存（供按鈕點擊時查找對應項目用）
+let currentDormantItems = [];
+
+function confirmDelistItem(idx){
+  const p = currentDormantItems[idx];
+  if(!p) return;
+  const set = loadDelistedSet();
+  const key = p.code || p.name;
+  const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
+  labels.forEach(label => set.add(`${label}::${key}`));
+  saveDelistedSet(set);
+  loadData(); // 重新讀取並套用最新的下架清單
 }
 
 /* 依已保存的順序（若有）排列下拉選單，若尚未存過排序則用原始順序 */
@@ -1031,7 +1066,8 @@ function render(shipments, orders, isAggregate){
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
       latestPrice:0, latestPriceDate:null, orderCount:0, firstDate:null, lastDate:null,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
-      orderMonths:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null
+      orderMonths:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
+      customerLabels:new Set()
     };
     return productMap[key];
   };
@@ -1043,6 +1079,7 @@ function render(shipments, orders, isAggregate){
     if(!pm) return;
     pm.totalQty += i.qty;
     pm.months.add(i.monthKey);
+    if(i.customerLabel) pm.customerLabels.add(i.customerLabel);
     if(!pm.firstDate || i.dateObj < pm.firstDate) pm.firstDate = i.dateObj;
     if(!pm.lastDate || i.dateObj > pm.lastDate) pm.lastDate = i.dateObj;
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) pm.recent7Qty += i.qty;
@@ -1059,6 +1096,7 @@ function render(shipments, orders, isAggregate){
     if(!pm) return;
     pm.owed += i.owed;
     pm.orderCount += 1;
+    if(i.customerLabel) pm.customerLabels.add(i.customerLabel);
     if(i.dateObj){
       pm.orderMonths.add(i.monthKey);
       if(!pm.firstOrderDate || i.dateObj < pm.firstOrderDate) pm.firstOrderDate = i.dateObj;
@@ -1071,7 +1109,7 @@ function render(shipments, orders, isAggregate){
   // 只保留有實際出貨紀錄的產品才進行用量分析（純訂單、還沒出過貨的產品沒有可分析的用量趨勢，
   // 但還是會透過「待出貨清單」單獨呈現，不會遺漏）
   let rawProducts = Object.values(productMap).filter(p => p.firstDate && p.lastDate);
-  const normName = (n) => String(n||'').trim().toUpperCase().replace(/\s+/g,' ');
+  const normName = (n) => String(n||'').trim().toUpperCase().replace(/\s+/g,' ').replace(/\s+BS$/,'');
   const parent = rawProducts.map((_,i) => i);
   function find(x){ while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
   function union(a,b){ const ra=find(a), rb=find(b); if(ra!==rb) parent[ra]=rb; }
@@ -1084,7 +1122,9 @@ function render(shipments, orders, isAggregate){
       const codeMatch = a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對
       const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && a.latestPrice === b.latestPrice; // 完全相等，不做容許誤差
       const matchCount = [nameMatch, codeMatch, priceMatch].filter(Boolean).length;
-      if(matchCount >= 2) union(i, j);
+      // 兩邊都沒有代碼可以比對時，品名完全相符（已忽略常見的bs結尾差異）本身就是很強的訊號，不需要再湊到2項
+      const bothCodeless = !a.code && !b.code;
+      if(matchCount >= 2 || (bothCodeless && nameMatch)) union(i, j);
     }
   }
 
@@ -1101,7 +1141,7 @@ function render(shipments, orders, isAggregate){
     // 以「訂單筆數最多」的那個視為正確代碼，其餘合併進去
     group.sort((a,b) => b.orderCount - a.orderCount);
     const canonical = group[0];
-    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths) };
+    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), customerLabels:new Set(canonical.customerLabels) };
     for(let k=1;k<group.length;k++){
       const dup = group[k];
       merged.totalQty += dup.totalQty;
@@ -1112,6 +1152,7 @@ function render(shipments, orders, isAggregate){
       merged.orderCount += dup.orderCount;
       dup.months.forEach(m => merged.months.add(m));
       dup.orderMonths.forEach(m => merged.orderMonths.add(m));
+      dup.customerLabels.forEach(l => merged.customerLabels.add(l));
       if(dup.firstDate < merged.firstDate) merged.firstDate = dup.firstDate;
       if(dup.lastDate > merged.lastDate) merged.lastDate = dup.lastDate;
       if(dup.firstOrderDate && (!merged.firstOrderDate || dup.firstOrderDate < merged.firstOrderDate)) merged.firstOrderDate = dup.firstOrderDate;
@@ -1162,6 +1203,14 @@ function render(shipments, orders, isAggregate){
 
   const stockListEl = document.getElementById('stockList');
   const watchlistEl = document.getElementById('watchlistBlock');
+  // 套用已確認下架的產品：只要該產品的「所有」相關客戶都已被標記下架，就整個排除，不再進入任何分析清單
+  const delistedSet = loadDelistedSet();
+  rawProducts = rawProducts.filter(p => {
+    const key = p.code || p.name;
+    const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
+    return !labels.every(label => delistedSet.has(`${label}::${key}`));
+  });
+
   const products = rawProducts;
   document.getElementById('stockListCount').textContent = products.length + ' 項';
 
@@ -1298,20 +1347,26 @@ function render(shipments, orders, isAggregate){
       `;
     }
     if(dormantItems.length > 0){
+      currentDormantItems = dormantItems;
       watchHtml += `
         <div class="watchlist-block" style="border-color:var(--ink-dim); border-left-color:var(--ink-dim);">
           <div class="watchlist-title" style="color:var(--ink-dim);">🗄 超過一年無下單無出貨，待人工確認是否下架（${dormantItems.length}）</div>
-          ${dormantItems.map(p => `
+          ${dormantItems.map((p, idx) => `
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
                   <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
                 </div>
-                <div class="w-tag" style="color:var(--ink-dim);">已 ${p.daysSinceLastOrder} 天沒下單 · ${p.daysSinceLastShip} 天沒出貨</div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <div class="w-tag" style="color:var(--ink-dim);">已 ${p.daysSinceLastOrder} 天沒下單 · ${p.daysSinceLastShip} 天沒出貨</div>
+                  <button class="delist-btn" onclick="confirmDelistItem(${idx})">確認下架</button>
+                </div>
               </div>
             `).join('')}
         </div>
       `;
+    } else {
+      currentDormantItems = [];
     }
     if(mergeLog.length > 0){
       watchHtml += `
