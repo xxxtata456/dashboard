@@ -440,7 +440,11 @@ const CUSTOMERS = [
   { label: '得力 DELICACY', brandCn: '得力 DELICACY', brandVn: 'ĐƠN HÀNG DELICACY · 訂單儀表板', query: 'DELICACY' },
   { label: '巧良 CHEAU LIANG', brandCn: '巧良 CHEAU LIANG', brandVn: 'ĐƠN HÀNG CHEAU LIANG · 訂單儀表板', query: 'CHEAU LIANG' },
   { label: '強盛 CHYANG SHENG', brandCn: '強盛 CHYANG SHENG', brandVn: 'ĐƠN HÀNG CHYANG SHENG · 訂單儀表板', query: 'CHYANG SHENG' },
-  { label: '晶苑 CRYSTAL ELEGANCER', brandCn: '晶苑 CRYSTAL ELEGANCER', brandVn: 'ĐƠN HÀNG CRYSTAL ELEGANCER · 訂單儀表板', query: 'CRYSTAL ELEGANCER' },
+  { label: '晶苑 CRYSTAL ELEGANCER', brandCn: '晶苑 CRYSTAL ELEGANCER', brandVn: 'ĐƠN HÀNG CRYSTAL ELEGANCER · 訂單儀表板', query: 'CRYSTAL ELEGANCER',
+    // 代碼更新對照表：客戶端改了代碼／品名，但其實是同一個產品，這裡手動登記「舊代碼 → 新代碼」
+    // 之後發現新的改名案例，直接在這裡加一行 '舊代碼': '新代碼' 就好，不用改任何其他邏輯
+    codeAliases: { 'HT-232': 'HT-232H' }
+  },
   { label: '德昂 DEON VN', brandCn: '德昂 DEON VN', brandVn: 'ĐƠN HÀNG DEON VN · 訂單儀表板', query: 'DEON VN' },
   { label: '德皇 ĐỨC HOÀNG', brandCn: '德皇 ĐỨC HOÀNG', brandVn: 'ĐƠN HÀNG ĐỨC HOÀNG · 訂單儀表板', query: 'ĐỨC HOÀNG' },
   { label: '儒鴻 ECLAT', brandCn: '儒鴻 ECLAT', brandVn: 'ĐƠN HÀNG ECLAT · 訂單儀表板', query: 'ECLAT' },
@@ -562,6 +566,39 @@ function confirmDelistItem(idx){
   loadData(); // 重新讀取並套用最新的下架清單
 }
 
+/* 已確認的自動合併紀錄：在「已自動合併的代碼」區塊按下確認後，永久記住不再提醒
+   key 格式為「客戶名稱::舊代碼=>新代碼」，同樣用客戶名稱區分，避免彙整總覽模式互相干擾 */
+const MERGE_ACK_KEY = 'dashboard_mergeAck_v1';
+
+function loadMergeAckSet(){
+  try{
+    const raw = localStorage.getItem(MERGE_ACK_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  }catch(e){ return new Set(); }
+}
+
+function saveMergeAckSet(set){
+  try{ localStorage.setItem(MERGE_ACK_KEY, JSON.stringify(Array.from(set))); }catch(e){ console.warn('無法儲存合併確認清單', e); }
+}
+
+// 目前畫面上「已自動合併的代碼」清單的暫存（供按鈕點擊時查找對應項目用）
+let currentMergeLog = [];
+
+function confirmMergeAck(idx){
+  const entry = currentMergeLog[idx];
+  if(!entry) return;
+  const set = loadMergeAckSet();
+  const pairKey = `${entry.from.code || entry.from.name}=>${entry.into.code || entry.into.name}`;
+  const labels = new Set([
+    ...(entry.from.customerLabels || []),
+    ...(entry.into.customerLabels || [])
+  ]);
+  const labelList = labels.size > 0 ? Array.from(labels) : ['__unknown__'];
+  labelList.forEach(label => set.add(`${label}::${pairKey}`));
+  saveMergeAckSet(set);
+  loadData(); // 重新讀取，該筆合併會照常進行，只是不再顯示提醒
+}
+
 /* 依已保存的順序（若有）排列下拉選單，若尚未存過排序則用原始順序 */
 function populateCustomerSelect(){
   const sel = document.getElementById('customerSelect');
@@ -647,6 +684,8 @@ async function loadData(){
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
     const { orders, shipments } = parseLedger(rows);
+    applyCodeAliases(orders, currentCustomer.codeAliases);
+    applyCodeAliases(shipments, currentCustomer.codeAliases);
     orders.forEach(it => it.customerLabel = currentCustomer.label);
     shipments.forEach(it => it.customerLabel = currentCustomer.label);
     render(shipments, orders, false);
@@ -674,6 +713,8 @@ async function loadAllCustomers(){
       const sheet = workbook.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
       const { orders, shipments } = parseLedger(rows);
+      applyCodeAliases(orders, c.codeAliases);
+      applyCodeAliases(shipments, c.codeAliases);
       orders.forEach(it => it.customerLabel = c.label);
       shipments.forEach(it => it.customerLabel = c.label);
       allOrders.push(...orders);
@@ -725,6 +766,15 @@ async function downloadFile(fileId){
    回傳 { orders, shipments }：
    - orders：訂單本身，只用在「待出貨清單」跟「還欠」判斷（維持看訂單，不受本次調整影響）
    - shipments：拆開後的每一筆實際出貨紀錄，業績／用量／月度走勢都改用這個計算 */
+/* 套用客戶專屬的「代碼更新對照表」：客戶端改了代碼/品名，但其實是同一個產品，
+   把舊代碼統一改寫成新代碼，這樣後續不管是彙整業績、用量分析、還欠、待出貨，都會自動當成同一個產品處理，不用另外調整邏輯 */
+function applyCodeAliases(records, aliases){
+  if(!aliases) return;
+  records.forEach(r => {
+    if(r.code && aliases[r.code]) r.code = aliases[r.code];
+  });
+}
+
 function parseLedger(rows){
   let headerRowIdx = -1;
   let headerRow = null;
@@ -1064,7 +1114,7 @@ function render(shipments, orders, isAggregate){
     if(!key) return null;
     if(!productMap[key]) productMap[key] = {
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
-      latestPrice:0, latestPriceDate:null, orderCount:0, firstDate:null, lastDate:null,
+      latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
       orderMonths:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
       customerLabels:new Set()
@@ -1084,7 +1134,11 @@ function render(shipments, orders, isAggregate){
     if(!pm.lastDate || i.dateObj > pm.lastDate) pm.lastDate = i.dateObj;
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) pm.recent7Qty += i.qty;
     if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recent30Qty += i.qty;
-    // 追蹤該產品「最新一筆有填單價」的出貨，作為目前單價參考
+    // 品名／單價都追蹤「最新一筆出貨」的版本，避免代碼更新對照表套用後，畫面還顯示舊品名
+    if(!pm.latestNameDate || i.dateObj > pm.latestNameDate){
+      if(i.name) pm.name = i.name;
+      pm.latestNameDate = i.dateObj;
+    }
     if(i.price > 0 && (!pm.latestPriceDate || i.dateObj > pm.latestPriceDate)){
       pm.latestPrice = i.price;
       pm.latestPriceDate = i.dateObj;
@@ -1167,6 +1221,10 @@ function render(shipments, orders, isAggregate){
       if(dup.latestPriceDate && (!merged.latestPriceDate || dup.latestPriceDate > merged.latestPriceDate)){
         merged.latestPrice = dup.latestPrice;
         merged.latestPriceDate = dup.latestPriceDate;
+      }
+      if(dup.latestNameDate && (!merged.latestNameDate || dup.latestNameDate > merged.latestNameDate)){
+        merged.name = dup.name;
+        merged.latestNameDate = dup.latestNameDate;
       }
       mergeLog.push({ from: dup, into: canonical });
     }
@@ -1375,21 +1433,35 @@ function render(shipments, orders, isAggregate){
     } else {
       currentDormantItems = [];
     }
-    if(mergeLog.length > 0){
+    // 篩掉使用者已經按過「確認」的合併紀錄，不再重複提醒
+    const mergeAckSet = loadMergeAckSet();
+    const visibleMergeLog = mergeLog.filter(({from, into}) => {
+      const pairKey = `${from.code || from.name}=>${into.code || into.name}`;
+      const labels = new Set([...(from.customerLabels || []), ...(into.customerLabels || [])]);
+      const labelList = labels.size > 0 ? Array.from(labels) : ['__unknown__'];
+      return !labelList.every(label => mergeAckSet.has(`${label}::${pairKey}`));
+    });
+    if(visibleMergeLog.length > 0){
+      currentMergeLog = visibleMergeLog;
       watchHtml += `
         <div class="watchlist-block">
-          <div class="watchlist-title">🔧 已自動合併的代碼（品名／代碼／單價，2項以上相符）（${mergeLog.length}組）</div>
-          ${mergeLog.map(({from, into}) => `
+          <div class="watchlist-title">🔧 已自動合併的代碼（品名／代碼／單價，2項以上相符）（${visibleMergeLog.length}組）</div>
+          ${visibleMergeLog.map(({from, into}, idx) => `
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(from.code)}（${fmtInt(from.totalQty)}） <span style="color:var(--ink-dim);">已併入</span> ${escapeHtml(into.code)}（${fmtInt(into.totalQty)}）</div>
                   <div class="w-code">${escapeHtml(into.name || into.code)}</div>
                 </div>
-                <div class="w-tag">已合併</div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <div class="w-tag">已合併</div>
+                  <button class="delist-btn" onclick="confirmMergeAck(${idx})">確認，不再提醒</button>
+                </div>
               </div>
             `).join('')}
         </div>
       `;
+    } else {
+      currentMergeLog = [];
     }
     watchlistEl.innerHTML = watchHtml;
 
