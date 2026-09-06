@@ -1118,9 +1118,20 @@ function render(shipments, orders, isAggregate){
 
   /* ---- 產品備貨分析：依產品分類彙整全期月均、近7天、近30天動態（以出貨為準） ---- */
   const productMap = {};
-  const getPM = (code, name) => {
-    const key = code || name;
-    if(!key) return null;
+  // 關鍵字強制合併：品名只要含有這些關鍵字，不管代碼、不管關鍵字後面接什麼字，一律視為同一產品
+  // （常見情境：同一款產品被不同人用各種簡寫/代號記錄，光靠品名/代碼/單價比對抓不出來，直接用關鍵字兜底）
+  // 之後遇到類似狀況，直接在陣列裡加一個字串就好
+  const KEYWORD_MERGE_RULES = ['SODIUM HYDROSULPHITE'];
+
+  const getPM = (code, name, customerLabel) => {
+    const upperName = String(name||'').toUpperCase();
+    const keywordHit = KEYWORD_MERGE_RULES.find(kw => upperName.includes(kw));
+    const baseKey = keywordHit || code || name;
+    if(!baseKey) return null;
+    // 代碼是客戶內部編號，不是我們公司統一的代碼，不同客戶完全可能剛好用到同一個代碼代表不同產品，
+    // 所以除了「關鍵字強制合併」這種明確指定要跨客戶合併的規則以外，key 一律加上客戶名稱隔開，
+    // 避免不同客戶的資料因為代碼巧合而被誤判成同一產品、悄悄加在一起
+    const key = keywordHit ? baseKey : `${customerLabel || '__unknown__'}::${baseKey}`;
     if(!productMap[key]) productMap[key] = {
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
       latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
@@ -1128,13 +1139,15 @@ function render(shipments, orders, isAggregate){
       orderMonths:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
       customerLabels:new Set()
     };
-    return productMap[key];
+    const pm = productMap[key];
+    if(!pm.code && code) pm.code = code; // 補上第一次沒抓到、但後面出現的代碼
+    return pm;
   };
   const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
   const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
   // 用量／全期月均／近7天／近30天／目前單價：全部以「實際出貨」計算
   withDate.forEach(i => {
-    const pm = getPM(i.code, i.name);
+    const pm = getPM(i.code, i.name, i.customerLabel);
     if(!pm) return;
     pm.totalQty += i.qty;
     pm.months.add(i.monthKey);
@@ -1155,7 +1168,7 @@ function render(shipments, orders, isAggregate){
   });
   // 還欠數量／訂單筆數：維持看訂單本身（跟出貨無關，這部分邏輯不變）
   orders.forEach(i => {
-    const pm = getPM(i.code, i.name);
+    const pm = getPM(i.code, i.name, i.customerLabel);
     if(!pm) return;
     pm.owed += i.owed;
     pm.orderCount += 1;
@@ -1180,13 +1193,17 @@ function render(shipments, orders, isAggregate){
   for(let i=0;i<rawProducts.length;i++){
     for(let j=i+1;j<rawProducts.length;j++){
       const a = rawProducts[i], b = rawProducts[j];
-      if(a.code && b.code && a.code === b.code) continue; // 代碼都有填且完全相同才跳過；兩邊代碼都空白時不能算「相同」，要繼續往下比對品名
+      // 兩邊是否曾經是同一個客戶：代碼是客戶內部編號，只有「同一客戶」內代碼相符才有意義；
+      // 不同客戶剛好用了同一個代碼純屬巧合，不能拿來當作「是同一產品」的證據
+      const sameCustomer = a.customerLabels && b.customerLabels &&
+        Array.from(a.customerLabels).some(l => b.customerLabels.has(l));
+      if(sameCustomer && a.code && b.code && a.code === b.code) continue; // 同客戶內代碼都有填且完全相同才跳過；兩邊代碼都空白時不能算「相同」，要繼續往下比對品名
       const nameMatch = normName(a.name) === normName(b.name) && normName(a.name) !== '';
-      const codeMatch = a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對
+      const codeMatch = sameCustomer && a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對；且僅同客戶內採信
       const priceMatch = a.latestPrice > 0 && b.latestPrice > 0 && a.latestPrice === b.latestPrice; // 完全相等，不做容許誤差
       const matchCount = [nameMatch, codeMatch, priceMatch].filter(Boolean).length;
       // 只要「至少一邊」沒有代碼可以比對，代碼缺席不代表「不是同一產品」，只是那筆資料沒登記代碼而已；
-      // 這時品名完全相符（已忽略常見的bs結尾差異）就是足夠強的訊號，不用硬湊到2項
+      // 這時品名完全相符（已忽略常見的bs結尾差異）就是足夠強的訊號，不用硬湊到2項（這條不牽涉代碼比對，跨客戶也適用）
       const missingCodeOnOneSide = !a.code || !b.code;
       if(matchCount >= 2 || (missingCodeOnOneSide && nameMatch)) union(i, j);
     }
@@ -1246,7 +1263,7 @@ function render(shipments, orders, isAggregate){
     if(upper.includes('MEKICRON') || upper.includes('MINCRON')) return '分散';
     if(upper.includes('SUNACID')) return '酸性';
     if(upper.includes('SUNAZOL')) return '反應';
-    if(upper.includes('SUNACRYL')) return '鹽基';
+    if(upper.includes('SUNACRYL') || upper.includes('SCATION')) return '鹽基';
     if(upper.includes('HEIQ')) return 'HeiQ';
     return '助劑';
   }
