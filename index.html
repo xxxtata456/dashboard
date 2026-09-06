@@ -443,7 +443,16 @@ const CUSTOMERS = [
   { label: '晶苑 CRYSTAL ELEGANCER', brandCn: '晶苑 CRYSTAL ELEGANCER', brandVn: 'ĐƠN HÀNG CRYSTAL ELEGANCER · 訂單儀表板', query: 'CRYSTAL ELEGANCER',
     // 代碼更新對照表：客戶端改了代碼／品名，但其實是同一個產品，這裡手動登記「舊代碼 → 新代碼」
     // 之後發現新的改名案例，直接在這裡加一行 '舊代碼': '新代碼' 就好，不用改任何其他邏輯
-    codeAliases: { 'HT-232': 'HT-232H' }
+    codeAliases: {
+      // HT-232 → HT-232H（品名也一起變了，但代碼比對只需要代碼本身）
+      '33B1135': '9A00-ADL3037',
+      '9A00-CDP1135': '9A00-ADL3037',
+      // KROMALON YELLOW／RED／BLUE PQS-N：各自都換過兩次代碼，統一併到目前使用的代碼
+      '9A00-DRD1000': '9A00-DRL513A', // YELLOW
+      '9A00-DRD3000': '9A00-DRL533A', // RED
+      '9A00DRD3000': '9A00-DRL533A',  // RED（其中一筆代碼打字漏了槓）
+      '9A00-DRD5000': '9A00-DRL553A'  // BLUE
+    }
   },
   { label: '德昂 DEON VN', brandCn: '德昂 DEON VN', brandVn: 'ĐƠN HÀNG DEON VN · 訂單儀表板', query: 'DEON VN' },
   { label: '德皇 ĐỨC HOÀNG', brandCn: '德皇 ĐỨC HOÀNG', brandVn: 'ĐƠN HÀNG ĐỨC HOÀNG · 訂單儀表板', query: 'ĐỨC HOÀNG' },
