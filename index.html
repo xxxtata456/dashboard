@@ -834,19 +834,12 @@ function parseLedger(rows){
     const price = colPrice>=0 ? parseFloat(String(row[colPrice]).replace(/,/g,'')) || 0 : 0;
     const qty   = colQty>=0 ? parseFloat(String(row[colQty]).replace(/,/g,'')) || 0 : 0;
     const owed  = colOwed>=0 ? parseFloat(String(row[colOwed]).replace(/,/g,'')) || 0 : 0;
-    // 過濾雜訊列：代碼／品名純數字（多半是誤讀到合計列或日期欄位），且沒有任何實際訂單金額
-    const looksLikeJunk = /^[\d.,]+$/.test(code) && /^[\d.,]+$/.test(name || '0');
-    if(looksLikeJunk && price === 0 && qty === 0 && owed === 0) continue;
-    // 數量跟還欠都是0，代表不是真正的訂單列（可能是合併儲存格造成的殘留列），一律排除
-    if(qty === 0 && owed === 0) continue;
     const rawDate = colDate>=0 ? row[colDate] : '';
     const dateObj = toDateObj(rawDate);
     const monthKey = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}` : null;
     const date = dateObj ? fmtDateShort(dateObj) : String(rawDate||'').trim();
-    const priceMissing = qty > 0 && price === 0;
 
-    orders.push({ code, name, price, qty, owed, date, monthKey, dateObj, priceMissing });
-
+    // 出貨欄位的解析獨立於「這一列訂數量／還欠是否為0」，避免訂數量填0但實際有出貨紀錄的列被整列漏掉
     for(const sc of shipCols){
       const raw = row[sc.idx];
       if(raw === '' || raw === null || raw === undefined) continue;
@@ -858,10 +851,15 @@ function parseLedger(rows){
         amount: price * shipQty,
         date: sc.dateStr,
         dateObj: sc.dateObj,
-        monthKey: sc.monthKey,
-        priceMissing
+        monthKey: sc.monthKey
       });
     }
+
+    // 數量跟還欠都是0，代表這一列本身不是真正的訂單列（可能是合併儲存格造成的殘留列），不列入「待出貨清單」的訂單資料
+    // （上面的出貨欄位已經解析完成，不受影響）
+    if(qty === 0 && owed === 0) continue;
+
+    orders.push({ code, name, price, qty, owed, date, monthKey, dateObj });
   }
   return { orders, shipments };
 }
@@ -909,21 +907,6 @@ function fmtInt(n){ return Math.round(n).toLocaleString('zh-Hant'); }
 
 function fmtDateShort(d){
   return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
-}
-
-/* 計算兩字串的編輯距離（Levenshtein distance），用於抓出疑似打錯字的相近代碼 */
-function levenshtein(a, b){
-  const m = a.length, n = b.length;
-  const dp = Array.from({length:m+1}, () => new Array(n+1).fill(0));
-  for(let i=0;i<=m;i++) dp[i][0] = i;
-  for(let j=0;j<=n;j++) dp[0][j] = j;
-  for(let i=1;i<=m;i++){
-    for(let j=1;j<=n;j++){
-      if(a[i-1] === b[j-1]) dp[i][j] = dp[i-1][j-1];
-      else dp[i][j] = 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
-    }
-  }
-  return dp[m][n];
 }
 
 function render(shipments, orders, isAggregate){
@@ -1205,7 +1188,9 @@ function render(shipments, orders, isAggregate){
       // 只要「至少一邊」沒有代碼可以比對，代碼缺席不代表「不是同一產品」，只是那筆資料沒登記代碼而已；
       // 這時品名完全相符（已忽略常見的bs結尾差異）就是足夠強的訊號，不用硬湊到2項（這條不牽涉代碼比對，跨客戶也適用）
       const missingCodeOnOneSide = !a.code || !b.code;
-      if(matchCount >= 2 || (missingCodeOnOneSide && nameMatch)) union(i, j);
+      // matchCount>=2 這條路徑一定要限制同客戶：nameMatch／priceMatch 本身都沒有限制客戶，
+      // 若不加 sameCustomer，兩個不同客戶剛好品名+單價相同（染料業很常見公版價格）就會被誤合併成同一產品
+      if((matchCount >= 2 && sameCustomer) || (missingCodeOnOneSide && nameMatch)) union(i, j);
     }
   }
 
@@ -1344,8 +1329,10 @@ function render(shipments, orders, isAggregate){
     const dormantItems = products.filter(p =>
       p.daysSinceLastOrder !== null && p.daysSinceLastOrder > DORMANT_DAYS && p.daysSinceLastShip > DORMANT_DAYS
     ).sort((a,b) => Math.max(b.daysSinceLastOrder,b.daysSinceLastShip) - Math.max(a.daysSinceLastOrder,a.daysSinceLastShip));
-    const dormantKeys = new Set(dormantItems.map(p => p.code || p.name));
-    const activeProducts = products.filter(p => !dormantKeys.has(p.code || p.name));
+    // 用物件本身的參照來判斷（而不是 code||name 字串），避免不同客戶剛好代碼/品名相同時，
+    // 把另一個客戶還在活躍出貨的品項也一併誤判成休眠而消失
+    const dormantSet = new Set(dormantItems);
+    const activeProducts = products.filter(p => !dormantSet.has(p));
 
     const REGULARITY_THRESHOLD = 0.6; // 活躍期間內至少6成月份都有紀錄，才算「規律」
 
