@@ -474,7 +474,12 @@ const CUSTOMERS = [
   { label: '越昆 VIET CÔN', brandCn: '越昆 VIET CÔN', brandVn: 'ĐƠN HÀNG VIET CÔN · 訂單儀表板', query: 'VIET CÔN' },
   { label: '中聚 ZHONG JU', brandCn: '中聚 ZHONG JU', brandVn: 'ĐƠN HÀNG ZHONG JU · 訂單儀表板', query: 'ZHONG JU' },
   { label: '綿春 MEN CHUEN', brandCn: '綿春 MEN CHUEN', brandVn: 'ĐƠN HÀNG MEN CHUEN · 訂單儀表板', query: 'MEN CHUEN' },
-  { label: '南方訂單', brandCn: '南方訂單', brandVn: '南方訂單 · 訂單儀表板', query: '南方訂單' },
+  { label: '南方訂單', brandCn: '南方訂單', brandVn: '南方訂單 · 訂單儀表板', query: '南方訂單',
+    // 品名合併規則（僅限這個客戶自己的資料）：品名只要含有這些關鍵字，就視為同一產品，
+    // 不影響其他客戶——跟全域的 KEYWORD_MERGE_RULES 不同，那個是不分客戶全部一起合併
+    // HT-HAS → SODIUM FORMALDEHYDE SULFOXYLATE (HT-HAS)：後來把簡稱換成正式化學名，其實是同一個產品
+    nameMergeRules: ['HT-HAS']
+  },
   { label: '遠東 POLYTEX', brandCn: '遠東 POLYTEX', brandVn: 'ĐƠN HÀNG POLYTEX · 訂單儀表板', query: 'POLYTEX' },
   { label: '裕源 YU YUANG', brandCn: '裕源 YU YUANG', brandVn: 'ĐƠN HÀNG YU YUANG · 訂單儀表板', query: 'YU YUANG' },
   { label: '振泰 CHEN TAI', brandCn: '振泰 CHEN TAI', brandVn: 'ĐƠN HÀNG CHEN TAI · 訂單儀表板', query: 'CHEN TAI' },
@@ -1105,15 +1110,22 @@ function render(shipments, orders, isAggregate){
   // （常見情境：同一款產品被不同人用各種簡寫/代號記錄，光靠品名/代碼/單價比對抓不出來，直接用關鍵字兜底）
   // 之後遇到類似狀況，直接在陣列裡加一個字串就好
   const KEYWORD_MERGE_RULES = ['SODIUM HYDROSULPHITE'];
+  // 單一客戶品名合併規則：跟上面的 KEYWORD_MERGE_RULES 不同，這個只在「同一個客戶」自己的資料範圍內生效，
+  // 不會影響到其他客戶（用 customerLabel 當 key 查表）
+  const CUSTOMER_NAME_MERGE_RULES = {};
+  CUSTOMERS.forEach(c => { if(c.nameMergeRules) CUSTOMER_NAME_MERGE_RULES[c.label] = c.nameMergeRules; });
 
   const getPM = (code, name, customerLabel) => {
     const upperName = String(name||'').toUpperCase();
     const keywordHit = KEYWORD_MERGE_RULES.find(kw => upperName.includes(kw));
-    const baseKey = keywordHit || code || name;
+    const customerKeywords = CUSTOMER_NAME_MERGE_RULES[customerLabel];
+    const customerKeywordHit = !keywordHit && customerKeywords ? customerKeywords.find(kw => upperName.includes(kw)) : null;
+    const baseKey = keywordHit || customerKeywordHit || code || name;
     if(!baseKey) return null;
     // 代碼是客戶內部編號，不是我們公司統一的代碼，不同客戶完全可能剛好用到同一個代碼代表不同產品，
     // 所以除了「關鍵字強制合併」這種明確指定要跨客戶合併的規則以外，key 一律加上客戶名稱隔開，
     // 避免不同客戶的資料因為代碼巧合而被誤判成同一產品、悄悄加在一起
+    // （customerKeywordHit 本來就只限定同一客戶，所以一樣要加客戶名稱；只有全域 keywordHit 才不加）
     const key = keywordHit ? baseKey : `${customerLabel || '__unknown__'}::${baseKey}`;
     if(!productMap[key]) productMap[key] = {
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
