@@ -1119,7 +1119,7 @@ function render(shipments, orders, isAggregate){
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
       latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
-      orderMonths:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
+      orderMonths:new Set(), orderDates:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
       customerLabels:new Set()
     };
     const pm = productMap[key];
@@ -1158,6 +1158,7 @@ function render(shipments, orders, isAggregate){
     if(i.customerLabel) pm.customerLabels.add(i.customerLabel);
     if(i.dateObj){
       pm.orderMonths.add(i.monthKey);
+      pm.orderDates.add(i.dateObj.getTime());
       if(!pm.firstOrderDate || i.dateObj < pm.firstOrderDate) pm.firstOrderDate = i.dateObj;
       if(!pm.lastOrderDate || i.dateObj > pm.lastOrderDate) pm.lastOrderDate = i.dateObj;
       if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recentOrder30Qty += i.qty;
@@ -1210,7 +1211,7 @@ function render(shipments, orders, isAggregate){
     const score = (p) => (p.code ? 2 : 0) + (/\sbs$/i.test(String(p.name||'').trim()) ? 1 : 0);
     group.sort((a,b) => score(b) - score(a) || b.orderCount - a.orderCount);
     const canonical = group[0];
-    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), customerLabels:new Set(canonical.customerLabels) };
+    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), orderDates:new Set(canonical.orderDates), customerLabels:new Set(canonical.customerLabels) };
     for(let k=1;k<group.length;k++){
       const dup = group[k];
       merged.totalQty += dup.totalQty;
@@ -1221,6 +1222,7 @@ function render(shipments, orders, isAggregate){
       merged.orderCount += dup.orderCount;
       dup.months.forEach(m => merged.months.add(m));
       dup.orderMonths.forEach(m => merged.orderMonths.add(m));
+      dup.orderDates.forEach(d => merged.orderDates.add(d));
       dup.customerLabels.forEach(l => merged.customerLabels.add(l));
       if(dup.firstDate < merged.firstDate) merged.firstDate = dup.firstDate;
       if(dup.lastDate > merged.lastDate) merged.lastDate = dup.lastDate;
@@ -1311,16 +1313,27 @@ function render(shipments, orders, isAggregate){
       p.activeSpanMonths = spanMonths;
       p.regularity = p.months.size / spanMonths;
       p.daysSinceLastShip = Math.floor((today - p.lastDate) / 86400000);
-      // 下單面規律性：活躍期間（首次~最後一次下單）內，有下單的月份佔比多高（跟出貨面分開算）
+      // 下單面規律性：活躍期間（首次~最後一次下單）內，有下單的月份佔比多高（跟出貨面分開算，僅供參考）
       if(p.firstOrderDate && p.lastOrderDate){
         const orderSpanMonths = (p.lastOrderDate.getFullYear()*12 + p.lastOrderDate.getMonth()) - (p.firstOrderDate.getFullYear()*12 + p.firstOrderDate.getMonth()) + 1;
         p.orderActiveSpanMonths = orderSpanMonths;
         p.orderRegularity = p.orderMonths.size / orderSpanMonths;
         p.daysSinceLastOrder = Math.floor((today - p.lastOrderDate) / 86400000);
+        // 平均下單間隔（天）：用實際下單日期算間隔，而不是用「月份覆蓋率」這種粗略指標——
+        // 覆蓋率 0.5 只代表「平均2個月下單一次」，不代表「多久沒下單才算異常」，
+        // 真正該比較的是「這次已經拖了多久」跟「平常間隔多久」的倍數關係
+        const uniqueOrderDates = Array.from(p.orderDates).sort((a,b) => a-b);
+        if(uniqueOrderDates.length >= 2){
+          const totalSpanDays = (uniqueOrderDates[uniqueOrderDates.length-1] - uniqueOrderDates[0]) / 86400000;
+          p.avgOrderIntervalDays = totalSpanDays / (uniqueOrderDates.length - 1);
+        } else {
+          p.avgOrderIntervalDays = null;
+        }
       } else {
         p.orderActiveSpanMonths = 0;
         p.orderRegularity = 0;
         p.daysSinceLastOrder = null;
+        p.avgOrderIntervalDays = null;
       }
     });
 
@@ -1346,10 +1359,16 @@ function render(shipments, orders, isAggregate){
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.recent30Qty > 0 && p.t30.dir === 'down')
       .sort((a,b) => a.t30.pct - b.t30.pct);
 
-    // ---- 近30天無下單：過去下單很規律，但近30天完全沒有新訂單。排除還有欠貨在途的（欠單還沒出清，客戶本來就不會急著下新單，屬於正常）----
+    // ---- 近期無下單：拿「這次已經沒下單多少天」跟「這個產品平常的下單間隔」比較，
+    // 只要拖的時間超過平常間隔的 ORDER_GAP_MULTIPLIER 倍，就算異常——不再用「月份覆蓋率」這種粗略門檻，
+    // 因為覆蓋率0.5只代表「平常大概2個月下單一次」，不代表現在拖139天不算事。
+    // 至少要有3個不同月份下過單，才有足夠資料建立「平常間隔」這個基準，避免用一兩筆資料就誤判。
+    // 排除還有欠貨在途的（欠單還沒出清，客戶本來就不會急著下新單，屬於正常）
+    const ORDER_GAP_MULTIPLIER = 2;
     const noOrderItems = activeProducts
-      .filter(p => p.orderActiveSpanMonths >= 3 && p.orderRegularity >= REGULARITY_THRESHOLD && p.recentOrder30Qty === 0 && p.owed === 0)
-      .sort((a,b) => b.daysSinceLastOrder - a.daysSinceLastOrder);
+      .filter(p => p.orderMonths.size >= 3 && p.avgOrderIntervalDays && p.owed === 0 &&
+        p.daysSinceLastOrder > p.avgOrderIntervalDays * ORDER_GAP_MULTIPLIER)
+      .sort((a,b) => (b.daysSinceLastOrder/b.avgOrderIntervalDays) - (a.daysSinceLastOrder/a.avgOrderIntervalDays));
 
     // ---- 用量異常增加：近30天明顯高於平常步調，可能要提前備貨或留意大單 ----
     const surgeItems = activeProducts
@@ -1408,12 +1427,12 @@ function render(shipments, orders, isAggregate){
     if(noOrderItems.length > 0){
       watchHtml += `
         <div class="watchlist-block">
-          <div class="watchlist-title">📭 近30天無下單（${noOrderItems.length}）</div>
+          <div class="watchlist-title">📭 下單間隔異常拉長（${noOrderItems.length}）</div>
           ${noOrderItems.map(p => `
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
-                  <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 平常約每 ${fmtInt(p.avgOrderIntervalDays)} 天下單一次</div>
                 </div>
                 <div class="w-tag">已 ${p.daysSinceLastOrder} 天沒下單</div>
               </div>
