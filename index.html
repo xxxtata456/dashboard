@@ -230,7 +230,7 @@
   /* 產品備貨分析 */
   .stock-row{
     display:grid;
-    grid-template-columns:1fr auto auto auto auto;
+    grid-template-columns:1fr auto auto auto auto auto;
     gap:14px;
     align-items:center;
     padding:13px 4px;
@@ -399,7 +399,7 @@
       <button class="period-tab active" id="tabCalendar" onclick="switchPeriodTab('calendar')">日曆制（月／季／年）</button>
       <button class="period-tab" id="tabRolling" onclick="switchPeriodTab('rolling')">移動天數（近N天）</button>
     </div>
-    <div class="period-grid" id="calendarGrid"></div>
+    <div class="period-grid four" id="calendarGrid"></div>
     <div class="period-grid four" id="rollingGrid" style="display:none;"></div>
 
     <div class="section-title">
@@ -1009,6 +1009,12 @@ function render(shipments, orders, isAggregate){
   const lyQuarterTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && Math.floor(i.dateObj.getMonth()/3)===curQ);
   const lyYearTotal = sumIf(i => i.dateObj.getFullYear()===curY-1);
 
+  // 上個月（跟去年同月比較，抓淡旺季用）
+  const pmDate = new Date(curY, curM-1, 1);
+  const pmY = pmDate.getFullYear(), pmM = pmDate.getMonth();
+  const lastMonthTotal = sumIf(i => i.dateObj.getFullYear()===pmY && i.dateObj.getMonth()===pmM);
+  const lyLastMonthTotal = sumIf(i => i.dateObj.getFullYear()===pmY-1 && i.dateObj.getMonth()===pmM);
+
   const yoyHtml = (curVal, lyVal) => {
     if(lyVal === 0){
       return curVal > 0 ? '<div class="p-yoy flat">去年同期無資料</div>' : '';
@@ -1022,6 +1028,7 @@ function render(shipments, orders, isAggregate){
 
   const calendarGrid = document.getElementById('calendarGrid');
   calendarGrid.innerHTML = `
+    <div class="period-card"><div class="p-label">上月</div><div class="p-amount mono">${fmtInt(lastMonthTotal)} đ</div><div class="p-sub">${pmY}年${pmM+1}月</div>${yoyHtml(lastMonthTotal, lyLastMonthTotal)}</div>
     <div class="period-card"><div class="p-label">本月</div><div class="p-amount mono">${fmtInt(monthTotal)} đ</div><div class="p-sub">${curY}年${curM+1}月</div>${yoyHtml(monthTotal, lyMonthTotal)}</div>
     <div class="period-card"><div class="p-label">本季</div><div class="p-amount mono">${fmtInt(quarterTotal)} đ</div><div class="p-sub">${curY}年第${curQ+1}季</div>${yoyHtml(quarterTotal, lyQuarterTotal)}</div>
     <div class="period-card"><div class="p-label">本年</div><div class="p-amount mono">${fmtInt(yearTotal)} đ</div><div class="p-sub">${curY}年全年</div>${yoyHtml(yearTotal, lyYearTotal)}</div>
@@ -1150,7 +1157,7 @@ function render(shipments, orders, isAggregate){
     const key = keywordHit ? baseKey : `${customerLabel || '__unknown__'}::${baseKey}`;
     if(!productMap[key]) productMap[key] = {
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
-      monthQty:0, quarterQty:0, yearQty:0, lyMonthQty:0, lyQuarterQty:0, lyYearQty:0,
+      monthQty:0, quarterQty:0, yearQty:0, lastMonthQty:0, lyMonthQty:0, lyQuarterQty:0, lyYearQty:0, lyLastMonthQty:0,
       latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
       orderMonths:new Set(), orderDates:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
@@ -1182,6 +1189,9 @@ function render(shipments, orders, isAggregate){
     if(iY===curY-1 && iM===curM) pm.lyMonthQty += i.qty;
     if(iY===curY-1 && iQ===curQ) pm.lyQuarterQty += i.qty;
     if(iY===curY-1) pm.lyYearQty += i.qty;
+    // 上個月（跟去年同月比較）
+    if(iY===pmY && iM===pmM) pm.lastMonthQty += i.qty;
+    if(iY===pmY-1 && iM===pmM) pm.lyLastMonthQty += i.qty;
     // 品名／單價都追蹤「最新一筆出貨」的版本，避免代碼更新對照表套用後，畫面還顯示舊品名
     if(!pm.latestNameDate || i.dateObj > pm.latestNameDate){
       if(i.name) pm.name = i.name;
@@ -1264,9 +1274,11 @@ function render(shipments, orders, isAggregate){
       merged.monthQty += dup.monthQty;
       merged.quarterQty += dup.quarterQty;
       merged.yearQty += dup.yearQty;
+      merged.lastMonthQty += dup.lastMonthQty;
       merged.lyMonthQty += dup.lyMonthQty;
       merged.lyQuarterQty += dup.lyQuarterQty;
       merged.lyYearQty += dup.lyYearQty;
+      merged.lyLastMonthQty += dup.lyLastMonthQty;
       merged.recentOrder30Qty += dup.recentOrder30Qty;
       merged.orderCount += dup.orderCount;
       dup.months.forEach(m => merged.months.add(m));
@@ -1361,6 +1373,7 @@ function render(shipments, orders, isAggregate){
       p.tMonth = trendOf(p.monthQty, p.lyMonthQty);
       p.tQuarter = trendOf(p.quarterQty, p.lyQuarterQty);
       p.tYear = trendOf(p.yearQty, p.lyYearQty);
+      p.tLastMonth = trendOf(p.lastMonthQty, p.lyLastMonthQty);
       // 出貨面規律性：活躍期間（首次~最後一次出貨）內，有出貨的月份佔比多高
       const spanMonths = (p.lastDate.getFullYear()*12 + p.lastDate.getMonth()) - (p.firstDate.getFullYear()*12 + p.firstDate.getMonth()) + 1;
       p.activeSpanMonths = spanMonths;
@@ -1562,6 +1575,7 @@ function render(shipments, orders, isAggregate){
             <div class="s-code">${escapeHtml(p.code)}</div>
           </div>
           <div class="s-num"><span class="s-num-label">單價</span>${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'}</div>
+          <div class="s-num qty-calendar"><span class="s-num-label">上月</span>${fmtInt(p.lastMonthQty)}<span class="s-trend-mini ${p.tLastMonth.dir}">${p.tLastMonth.arrow}</span></div>
           <div class="s-num qty-calendar"><span class="s-num-label">本月</span>${fmtInt(p.monthQty)}<span class="s-trend-mini ${p.tMonth.dir}">${p.tMonth.arrow}</span></div>
           <div class="s-num qty-calendar"><span class="s-num-label">本季</span>${fmtInt(p.quarterQty)}<span class="s-trend-mini ${p.tQuarter.dir}">${p.tQuarter.arrow}</span></div>
           <div class="s-num qty-calendar"><span class="s-num-label">本年</span>${fmtInt(p.yearQty)}<span class="s-trend-mini ${p.tYear.dir}">${p.tYear.arrow}</span></div>
