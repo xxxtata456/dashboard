@@ -1117,9 +1117,13 @@ function render(shipments, orders, isAggregate){
 
   const getPM = (code, name, customerLabel) => {
     const upperName = String(name||'').toUpperCase();
-    const keywordHit = KEYWORD_MERGE_RULES.find(kw => upperName.includes(kw));
+    // 比對關鍵字時先把空格全部拿掉再比，避免同一個化學品因為「HYDRO SULPHITE」vs「HYDROSULPHITE」
+    // 這種空格打法差異，或未來類似的空格差異，就漏掉合併
+    const normalizedName = upperName.replace(/\s+/g, '');
+    const norm = s => String(s).replace(/\s+/g, '');
+    const keywordHit = KEYWORD_MERGE_RULES.find(kw => normalizedName.includes(norm(kw)));
     const customerKeywords = CUSTOMER_NAME_MERGE_RULES[customerLabel];
-    const customerKeywordHit = !keywordHit && customerKeywords ? customerKeywords.find(kw => upperName.includes(kw)) : null;
+    const customerKeywordHit = !keywordHit && customerKeywords ? customerKeywords.find(kw => normalizedName.includes(norm(kw))) : null;
     const baseKey = keywordHit || customerKeywordHit || code || name;
     if(!baseKey) return null;
     // 代碼是客戶內部編號，不是我們公司統一的代碼，不同客戶完全可能剛好用到同一個代碼代表不同產品，
