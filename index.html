@@ -253,6 +253,10 @@
   .stock-row .s-num .s-trend-mini.up{ color:var(--jade); }
   .stock-row .s-num .s-trend-mini.down{ color:var(--seal); }
   .stock-row .s-num .s-trend-mini.flat{ color:var(--ink-dim); }
+  /* 產品備貨分析：日曆制／移動天數制切換，同一列裡兩組數字都渲染好，只是show/hide，不用重新整理清單 */
+  #stockList .qty-rolling{ display:none; }
+  #stockList.qty-mode-rolling .qty-calendar{ display:none; }
+  #stockList.qty-mode-rolling .qty-rolling{ display:block; }
 
   /* 頂層分頁 */
   .main-tabs{
@@ -416,8 +420,12 @@
       <h2>產品備貨分析</h2>
       <span class="count" id="stockListCount"></span>
     </div>
+    <div class="period-tabs">
+      <button class="period-tab active" id="tabQtyCalendar" onclick="switchQtyPeriodTab('calendar')">日曆制（月／季／年）</button>
+      <button class="period-tab" id="tabQtyRolling" onclick="switchQtyPeriodTab('rolling')">移動天數（近7／30天）</button>
+    </div>
     <div id="watchlistBlock"></div>
-    <div class="ledger" id="stockList">
+    <div class="ledger qty-mode-calendar" id="stockList">
       <div class="empty">讀取中…</div>
     </div>
   </div>
@@ -901,6 +909,15 @@ function switchPeriodTab(mode){
   document.getElementById('rollingGrid').style.display = mode==='rolling' ? 'grid' : 'none';
 }
 
+// 產品備貨分析的日曆制／移動天數制切換：每個產品列都同時渲染了兩組數字（.qty-calendar / .qty-rolling），
+// 切換分頁只是show/hide，不用重新渲染整個清單
+function switchQtyPeriodTab(mode){
+  document.getElementById('tabQtyCalendar').classList.toggle('active', mode==='calendar');
+  document.getElementById('tabQtyRolling').classList.toggle('active', mode==='rolling');
+  document.getElementById('stockList').classList.toggle('qty-mode-calendar', mode==='calendar');
+  document.getElementById('stockList').classList.toggle('qty-mode-rolling', mode==='rolling');
+}
+
 function switchMainTab(mode){
   document.getElementById('mainTabRevenue').classList.toggle('active', mode==='revenue');
   document.getElementById('mainTabQty').classList.toggle('active', mode==='qty');
@@ -1133,6 +1150,7 @@ function render(shipments, orders, isAggregate){
     const key = keywordHit ? baseKey : `${customerLabel || '__unknown__'}::${baseKey}`;
     if(!productMap[key]) productMap[key] = {
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
+      monthQty:0, quarterQty:0, yearQty:0, lyMonthQty:0, lyQuarterQty:0, lyYearQty:0,
       latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
       orderMonths:new Set(), orderDates:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
@@ -1155,6 +1173,15 @@ function render(shipments, orders, isAggregate){
     if(!pm.lastDate || i.dateObj > pm.lastDate) pm.lastDate = i.dateObj;
     if(i.dateObj >= sevenDaysAgo && i.dateObj <= today) pm.recent7Qty += i.qty;
     if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recent30Qty += i.qty;
+    // 日曆制：本月／本季／本年（跟業績金額那邊用同一套 curY/curM/curQ 基準）
+    const iY = i.dateObj.getFullYear(), iM = i.dateObj.getMonth(), iQ = Math.floor(iM/3);
+    if(iY===curY && iM===curM) pm.monthQty += i.qty;
+    if(iY===curY && iQ===curQ) pm.quarterQty += i.qty;
+    if(iY===curY) pm.yearQty += i.qty;
+    // 去年同期，用來算日曆制那邊的年增/年減
+    if(iY===curY-1 && iM===curM) pm.lyMonthQty += i.qty;
+    if(iY===curY-1 && iQ===curQ) pm.lyQuarterQty += i.qty;
+    if(iY===curY-1) pm.lyYearQty += i.qty;
     // 品名／單價都追蹤「最新一筆出貨」的版本，避免代碼更新對照表套用後，畫面還顯示舊品名
     if(!pm.latestNameDate || i.dateObj > pm.latestNameDate){
       if(i.name) pm.name = i.name;
@@ -1234,6 +1261,12 @@ function render(shipments, orders, isAggregate){
       merged.owed += dup.owed;
       merged.recent7Qty += dup.recent7Qty;
       merged.recent30Qty += dup.recent30Qty;
+      merged.monthQty += dup.monthQty;
+      merged.quarterQty += dup.quarterQty;
+      merged.yearQty += dup.yearQty;
+      merged.lyMonthQty += dup.lyMonthQty;
+      merged.lyQuarterQty += dup.lyQuarterQty;
+      merged.lyYearQty += dup.lyYearQty;
       merged.recentOrder30Qty += dup.recentOrder30Qty;
       merged.orderCount += dup.orderCount;
       dup.months.forEach(m => merged.months.add(m));
@@ -1324,6 +1357,10 @@ function render(shipments, orders, isAggregate){
       p.expected30d = p.fullAvg;
       p.t7 = trendOf(p.recent7Qty, p.expected7d);
       p.t30 = trendOf(p.recent30Qty, p.expected30d);
+      // 日曆制（本月／本季／本年）的年增/年減箭頭，跟業績金額那邊的去年同期比較同一個邏輯
+      p.tMonth = trendOf(p.monthQty, p.lyMonthQty);
+      p.tQuarter = trendOf(p.quarterQty, p.lyQuarterQty);
+      p.tYear = trendOf(p.yearQty, p.lyYearQty);
       // 出貨面規律性：活躍期間（首次~最後一次出貨）內，有出貨的月份佔比多高
       const spanMonths = (p.lastDate.getFullYear()*12 + p.lastDate.getMonth()) - (p.firstDate.getFullYear()*12 + p.firstDate.getMonth()) + 1;
       p.activeSpanMonths = spanMonths;
@@ -1525,9 +1562,12 @@ function render(shipments, orders, isAggregate){
             <div class="s-code">${escapeHtml(p.code)}</div>
           </div>
           <div class="s-num"><span class="s-num-label">單價</span>${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'}</div>
-          <div class="s-num"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
-          <div class="s-num"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${p.t7.dir}">${p.t7.arrow}</span></div>
-          <div class="s-num"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${p.t30.dir}">${p.t30.arrow}</span></div>
+          <div class="s-num qty-calendar"><span class="s-num-label">本月</span>${fmtInt(p.monthQty)}<span class="s-trend-mini ${p.tMonth.dir}">${p.tMonth.arrow}</span></div>
+          <div class="s-num qty-calendar"><span class="s-num-label">本季</span>${fmtInt(p.quarterQty)}<span class="s-trend-mini ${p.tQuarter.dir}">${p.tQuarter.arrow}</span></div>
+          <div class="s-num qty-calendar"><span class="s-num-label">本年</span>${fmtInt(p.yearQty)}<span class="s-trend-mini ${p.tYear.dir}">${p.tYear.arrow}</span></div>
+          <div class="s-num qty-rolling"><span class="s-num-label">全期月均</span>${fmtInt(p.fullAvg)}</div>
+          <div class="s-num qty-rolling"><span class="s-num-label">近7天</span>${fmtInt(p.recent7Qty)}<span class="s-trend-mini ${p.t7.dir}">${p.t7.arrow}</span></div>
+          <div class="s-num qty-rolling"><span class="s-num-label">近30天</span>${fmtInt(p.recent30Qty)}<span class="s-trend-mini ${p.t30.dir}">${p.t30.arrow}</span></div>
         </div>
       `;
 
