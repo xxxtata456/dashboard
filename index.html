@@ -253,6 +253,12 @@
   .stock-row .s-num .s-trend-mini.up{ color:var(--jade); }
   .stock-row .s-num .s-trend-mini.down{ color:var(--seal); }
   .stock-row .s-num .s-trend-mini.flat{ color:var(--ink-dim); }
+  .stock-search{
+    width:100%; box-sizing:border-box; padding:9px 12px; margin-bottom:10px;
+    border:1px solid var(--line); border-radius:2px; background:var(--surface);
+    font-family:'Noto Sans TC',sans-serif; font-size:14px; color:var(--ink);
+  }
+  .stock-search:focus{ outline:none; border-color:var(--brass); }
   /* 產品備貨分析：日曆制／移動天數制切換，同一列裡兩組數字都渲染好，只是show/hide，不用重新整理清單 */
   #stockList .qty-rolling{ display:none; }
   #stockList.qty-mode-rolling .qty-calendar{ display:none; }
@@ -385,6 +391,7 @@
   <div class="main-tabs">
     <button class="main-tab active" id="mainTabRevenue" onclick="switchMainTab('revenue')">業績金額</button>
     <button class="main-tab" id="mainTabQty" onclick="switchMainTab('qty')">產品分析</button>
+    <button class="main-tab" id="mainTabSettings" onclick="switchMainTab('settings')">設定管理</button>
   </div>
 
   <!-- ===== 業績金額分頁 ===== -->
@@ -425,6 +432,7 @@
       <button class="period-tab" id="tabQtyRolling" onclick="switchQtyPeriodTab('rolling')">移動天數（近7／30天）</button>
     </div>
     <div id="watchlistBlock"></div>
+    <input type="text" id="stockSearchInput" class="stock-search" placeholder="搜尋品名或代碼…" oninput="filterStockList(this.value)">
     <div class="ledger qty-mode-calendar" id="stockList">
       <div class="empty">讀取中…</div>
     </div>
@@ -432,6 +440,33 @@
 
   <div class="foot">
     <button class="reload" id="reloadBtn">重新整理資料</button>
+  </div>
+
+  <!-- ===== 設定管理分頁 ===== -->
+  <div id="panelSettings" style="display:none;">
+    <div class="section-title">
+      <span class="num">A</span>
+      <h2>停止合作客戶</h2>
+    </div>
+    <div class="ledger" id="settingsInactiveList"></div>
+
+    <div class="section-title" style="margin-top:24px;">
+      <span class="num">B</span>
+      <h2>已下架商品</h2>
+    </div>
+    <div class="ledger" id="settingsDelistedList"></div>
+
+    <div class="section-title" style="margin-top:24px;">
+      <span class="num">C</span>
+      <h2>已合併確認紀錄</h2>
+    </div>
+    <div class="ledger" id="settingsMergeAckList"></div>
+
+    <div class="section-title" style="margin-top:24px;">
+      <span class="num">D</span>
+      <h2>最近一次總覽讀取失敗紀錄</h2>
+    </div>
+    <div class="ledger" id="settingsFetchFailuresList"></div>
   </div>
 </div>
 
@@ -621,17 +656,179 @@ function confirmMergeAck(idx){
   loadData(); // 重新讀取，該筆合併會照常進行，只是不再顯示提醒
 }
 
+/* 停止合作客戶：預設值寫在 CUSTOMERS[].inactive，但也可以在「設定管理」面板裡直接勾選切換，
+   切換的結果存在這裡（覆寫預設值），不用每次都要改程式碼 */
+const INACTIVE_OVERRIDE_KEY = 'dashboard_inactiveOverride_v1';
+
+function loadInactiveOverrides(){
+  try{
+    const raw = localStorage.getItem(INACTIVE_OVERRIDE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  }catch(e){ return {}; }
+}
+
+function saveInactiveOverrides(obj){
+  try{ localStorage.setItem(INACTIVE_OVERRIDE_KEY, JSON.stringify(obj)); }catch(e){ console.warn('無法儲存停止合作覆寫設定', e); }
+}
+
+function isCustomerInactive(c){
+  const overrides = loadInactiveOverrides();
+  if(Object.prototype.hasOwnProperty.call(overrides, c.label)) return overrides[c.label];
+  return !!c.inactive;
+}
+
+function toggleCustomerInactive(label){
+  const overrides = loadInactiveOverrides();
+  const c = CUSTOMERS.find(x => x.label === label);
+  if(!c) return;
+  const current = isCustomerInactive(c);
+  overrides[label] = !current;
+  saveInactiveOverrides(overrides);
+  populateCustomerSelect();
+  renderSettingsPanel();
+}
+
+/* 全部客戶總覽最近一次讀取失敗的紀錄，供「設定管理」面板顯示原因，方便排查 */
+const LAST_FETCH_FAILURES_KEY = 'dashboard_lastFetchFailures_v1';
+
+function saveLastFetchFailures(failures){
+  try{ localStorage.setItem(LAST_FETCH_FAILURES_KEY, JSON.stringify({ when: new Date().toISOString(), failures })); }catch(e){ console.warn('無法儲存讀取失敗紀錄', e); }
+}
+
+function loadLastFetchFailures(){
+  try{
+    const raw = localStorage.getItem(LAST_FETCH_FAILURES_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+
+// 目前畫面上「已下架商品」「已合併確認紀錄」清單的暫存（供按鈕點擊時查找對應項目用，做法跟 currentDormantItems 一致）
+let currentDelistedKeys = [];
+let currentMergeAckKeys = [];
+
+function restoreDelistItem(idx){
+  const rawKey = currentDelistedKeys[idx];
+  if(rawKey === undefined) return;
+  const set = loadDelistedSet();
+  set.delete(rawKey);
+  saveDelistedSet(set);
+  renderSettingsPanel();
+}
+
+function restoreMergeAck(idx){
+  const rawKey = currentMergeAckKeys[idx];
+  if(rawKey === undefined) return;
+  const set = loadMergeAckSet();
+  set.delete(rawKey);
+  saveMergeAckSet(set);
+  renderSettingsPanel();
+}
+
+function clearLastFetchFailures(){
+  try{ localStorage.removeItem(LAST_FETCH_FAILURES_KEY); }catch(e){}
+  renderSettingsPanel();
+}
+
+// 把「客戶名::key」格式的字串拆開來顯示，key 本身也可能含有 :: 以外的內容，所以只切第一個 ::
+function splitLabelKey(raw){
+  const idx = raw.indexOf('::');
+  if(idx === -1) return { label: '（未知客戶）', rest: raw };
+  return { label: raw.slice(0, idx), rest: raw.slice(idx+2) };
+}
+
+function renderSettingsPanel(){
+  // ---- A. 停止合作客戶 ----
+  const realCustomers = CUSTOMERS.filter(c => !c.isAggregate);
+  const inactiveListEl = document.getElementById('settingsInactiveList');
+  inactiveListEl.innerHTML = realCustomers.map(c => {
+    const inactive = isCustomerInactive(c);
+    return `
+      <div class="watch-row">
+        <div>
+          <div class="w-name">${escapeHtml(c.label)}</div>
+          <div class="w-code">${inactive ? '目前：已停止合作，全部客戶總覽不會讀取這家' : '目前：正常合作中'}</div>
+        </div>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="checkbox" ${inactive ? 'checked' : ''} onchange="toggleCustomerInactive('${c.label.replace(/'/g,"\\'")}')">
+          <span class="w-tag" style="${inactive ? '' : 'color:var(--ink-dim);'}">停止合作</span>
+        </label>
+      </div>
+    `;
+  }).join('');
+
+  // ---- B. 已下架商品 ----
+  const delistedKeys = Array.from(loadDelistedSet());
+  currentDelistedKeys = delistedKeys;
+  const delistedListEl = document.getElementById('settingsDelistedList');
+  delistedListEl.innerHTML = delistedKeys.length === 0
+    ? '<div class="empty">目前沒有已下架的商品</div>'
+    : delistedKeys.map((raw, idx) => {
+        const { label, rest } = splitLabelKey(raw);
+        return `
+          <div class="watch-row">
+            <div>
+              <div class="w-name">${escapeHtml(rest)}</div>
+              <div class="w-code">客戶：${escapeHtml(label)}</div>
+            </div>
+            <button class="delist-btn" onclick="restoreDelistItem(${idx})">復原（取消下架）</button>
+          </div>
+        `;
+      }).join('');
+
+  // ---- C. 已合併確認紀錄 ----
+  const mergeAckKeys = Array.from(loadMergeAckSet());
+  currentMergeAckKeys = mergeAckKeys;
+  const mergeAckListEl = document.getElementById('settingsMergeAckList');
+  mergeAckListEl.innerHTML = mergeAckKeys.length === 0
+    ? '<div class="empty">目前沒有已確認的合併紀錄</div>'
+    : mergeAckKeys.map((raw, idx) => {
+        const { label, rest } = splitLabelKey(raw);
+        const [from, into] = rest.split('=>');
+        return `
+          <div class="watch-row">
+            <div>
+              <div class="w-name">${escapeHtml(from||rest)} <span style="color:var(--ink-dim);">→</span> ${escapeHtml(into||'')}</div>
+              <div class="w-code">客戶：${escapeHtml(label)}</div>
+            </div>
+            <button class="delist-btn" onclick="restoreMergeAck(${idx})">取消確認</button>
+          </div>
+        `;
+      }).join('');
+
+  // ---- D. 最近一次總覽讀取失敗紀錄 ----
+  const failuresData = loadLastFetchFailures();
+  const failuresListEl = document.getElementById('settingsFetchFailuresList');
+  if(!failuresData || !failuresData.failures || failuresData.failures.length === 0){
+    failuresListEl.innerHTML = '<div class="empty">上一次「全部客戶總覽」沒有讀取失敗的客戶</div>';
+  } else {
+    const whenStr = failuresData.when ? new Date(failuresData.when).toLocaleString('zh-Hant') : '';
+    failuresListEl.innerHTML = `
+      <div class="w-code" style="margin-bottom:8px;">讀取時間：${escapeHtml(whenStr)}　
+        <button class="delist-btn" onclick="clearLastFetchFailures()">清除紀錄</button>
+      </div>
+      ${failuresData.failures.map(f => `
+          <div class="watch-row">
+            <div>
+              <div class="w-name">${escapeHtml(f.label)}</div>
+              <div class="w-code">${escapeHtml(f.message)}</div>
+            </div>
+          </div>
+        `).join('')}
+    `;
+  }
+}
+
 /* 依已保存的順序（若有）排列下拉選單，若尚未存過排序則用原始順序 */
 // 已停止合作的客戶：資料保留，選單裡還看得到、還能手動點進去看歷史資料，
 // 只是不會被排進「全部客戶總覽」的自動讀取清單裡（見 loadAllCustomers）
-const optionLabel = (c) => c.inactive ? `${c.label}（已停止合作）` : c.label;
+const optionLabel = (c) => isCustomerInactive(c) ? `${c.label}（已停止合作）` : c.label;
 
 // 停止合作的客戶一律沉到選單最下面，不管排序清單/業績排行怎麼排，「全部客戶總覽」永遠排第一個不動
 function sinkInactive(orderedIdx, aggregateIdx){
   const head = orderedIdx.filter(i => i === aggregateIdx);
   const rest = orderedIdx.filter(i => i !== aggregateIdx);
-  const activeIdx = rest.filter(i => !CUSTOMERS[i].inactive);
-  const inactiveIdx = rest.filter(i => CUSTOMERS[i].inactive);
+  const activeIdx = rest.filter(i => !isCustomerInactive(CUSTOMERS[i]));
+  const inactiveIdx = rest.filter(i => isCustomerInactive(CUSTOMERS[i]));
   return [...head, ...activeIdx, ...inactiveIdx];
 }
 
@@ -736,13 +933,15 @@ async function loadData(){
 
 async function loadAllCustomers(){
   // 已停止合作的客戶不再讀取，加快總覽速度；資料還是保留在他們自己的分頁裡，隨時可以手動點進去看
-  const realCustomers = CUSTOMERS.filter(c => !c.isAggregate && !c.inactive);
+  const realCustomers = CUSTOMERS.filter(c => !c.isAggregate && !isCustomerInactive(c));
   const allOrders = [];
   const allShipments = [];
   const failed = [];
-  for(let idx=0; idx<realCustomers.length; idx++){
-    const c = realCustomers[idx];
-    setSyncStatus('loading', `讀取中…（${idx+1}/${realCustomers.length}）${c.label}`);
+  let completed = 0;
+  // 同時開幾個併發請求，而不是一家一家排隊等——只要別把並發數開太高（避免瞬間打爆 Drive API 的速率限制），
+  // 6 家同時抓，總時間大概可以縮到原本的 1/5~1/6
+  const CONCURRENCY = 6;
+  const fetchOne = async (c) => {
     try{
       const fileId = await findFile(c.query);
       const buf = await downloadFile(fileId);
@@ -759,11 +958,24 @@ async function loadAllCustomers(){
       allShipments.push(...shipments);
     } catch(err){
       console.error(c.label, err);
-      failed.push(c.label);
+      failed.push({ label: c.label, message: (err && err.message) ? err.message : String(err) });
+    } finally {
+      completed++;
+      setSyncStatus('loading', `讀取中…（${completed}/${realCustomers.length}）`);
     }
-  }
+  };
+  let cursor = 0;
+  const worker = async () => {
+    while(cursor < realCustomers.length){
+      const c = realCustomers[cursor++];
+      await fetchOne(c);
+    }
+  };
+  const workers = Array.from({length: Math.min(CONCURRENCY, realCustomers.length)}, worker);
+  await Promise.all(workers);
+  saveLastFetchFailures(failed);
   if(failed.length > 0){
-    showError('以下客戶讀取失敗，總覽數字不包含這些客戶：\n' + failed.join('、'));
+    showError('以下客戶讀取失敗，總覽數字不包含這些客戶（詳細原因可以到「設定管理」分頁查看）：\n' + failed.map(f=>f.label).join('、'));
   }
   render(allShipments, allOrders, true);
   setSyncStatus(failed.length > 0 ? 'error' : 'done', failed.length > 0 ? `資料已讀取完畢（${failed.length} 家失敗）` : '全部客戶資料已讀取完畢');
@@ -934,11 +1146,29 @@ function switchQtyPeriodTab(mode){
   document.getElementById('stockList').classList.toggle('qty-mode-rolling', mode==='rolling');
 }
 
+// 產品搜尋框：依品名／代碼即時篩選，符合的類別群組整個保留，完全沒符合的類別群組整個隱藏
+function filterStockList(query){
+  const q = String(query||'').trim().toLowerCase();
+  const groups = document.querySelectorAll('#stockList .cat-group');
+  groups.forEach(group => {
+    let anyVisible = false;
+    group.querySelectorAll('.stock-row').forEach(row => {
+      const match = !q || (row.getAttribute('data-search') || '').includes(q);
+      row.style.display = match ? '' : 'none';
+      if(match) anyVisible = true;
+    });
+    group.style.display = anyVisible ? '' : 'none';
+  });
+}
+
 function switchMainTab(mode){
   document.getElementById('mainTabRevenue').classList.toggle('active', mode==='revenue');
   document.getElementById('mainTabQty').classList.toggle('active', mode==='qty');
+  document.getElementById('mainTabSettings').classList.toggle('active', mode==='settings');
   document.getElementById('panelRevenue').style.display = mode==='revenue' ? 'block' : 'none';
   document.getElementById('panelQty').style.display = mode==='qty' ? 'block' : 'none';
+  document.getElementById('panelSettings').style.display = mode==='settings' ? 'block' : 'none';
+  if(mode==='settings') renderSettingsPanel();
 }
 
 function fmtInt(n){ return Math.round(n).toLocaleString('zh-Hant'); }
@@ -1175,6 +1405,7 @@ function render(shipments, orders, isAggregate){
       code, name, totalQty:0, owed:0, months:new Set(), recent7Qty:0, recent30Qty:0,
       monthQty:0, quarterQty:0, yearQty:0, lastMonthQty:0, lyMonthQty:0, lyQuarterQty:0, lyYearQty:0, lyLastMonthQty:0,
       latestPrice:0, latestPriceDate:null, latestNameDate:null, orderCount:0, firstDate:null, lastDate:null,
+      priceHistory:[], priceMissingCount:0, priceMissingQty:0,
       // 下單面（跟出貨面分開追蹤，用來判斷「近30天無下單」）
       orderMonths:new Set(), orderDates:new Set(), recentOrder30Qty:0, firstOrderDate:null, lastOrderDate:null,
       customerLabels:new Set()
@@ -1217,6 +1448,7 @@ function render(shipments, orders, isAggregate){
       pm.latestPrice = i.price;
       pm.latestPriceDate = i.dateObj;
     }
+    if(i.price > 0) pm.priceHistory.push({ price: i.price, time: i.dateObj.getTime() });
   });
   // 還欠數量／訂單筆數：維持看訂單本身（跟出貨無關，這部分邏輯不變）
   orders.forEach(i => {
@@ -1224,6 +1456,10 @@ function render(shipments, orders, isAggregate){
     if(!pm) return;
     pm.owed += i.owed;
     pm.orderCount += 1;
+    if(i.qty > 0 && i.price === 0){
+      pm.priceMissingCount += 1;
+      pm.priceMissingQty += i.qty;
+    }
     if(i.customerLabel) pm.customerLabels.add(i.customerLabel);
     if(i.dateObj){
       pm.orderMonths.add(i.monthKey);
@@ -1280,7 +1516,7 @@ function render(shipments, orders, isAggregate){
     const score = (p) => (p.code ? 2 : 0) + (/\sbs$/i.test(String(p.name||'').trim()) ? 1 : 0);
     group.sort((a,b) => score(b) - score(a) || b.orderCount - a.orderCount);
     const canonical = group[0];
-    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), orderDates:new Set(canonical.orderDates), customerLabels:new Set(canonical.customerLabels) };
+    const merged = { ...canonical, months:new Set(canonical.months), orderMonths:new Set(canonical.orderMonths), orderDates:new Set(canonical.orderDates), customerLabels:new Set(canonical.customerLabels), priceHistory:[...canonical.priceHistory] };
     for(let k=1;k<group.length;k++){
       const dup = group[k];
       merged.totalQty += dup.totalQty;
@@ -1297,6 +1533,9 @@ function render(shipments, orders, isAggregate){
       merged.lyLastMonthQty += dup.lyLastMonthQty;
       merged.recentOrder30Qty += dup.recentOrder30Qty;
       merged.orderCount += dup.orderCount;
+      merged.priceMissingCount += dup.priceMissingCount;
+      merged.priceMissingQty += dup.priceMissingQty;
+      merged.priceHistory.push(...dup.priceHistory);
       dup.months.forEach(m => merged.months.add(m));
       dup.orderMonths.forEach(m => merged.orderMonths.add(m));
       dup.orderDates.forEach(d => merged.orderDates.add(d));
@@ -1390,6 +1629,26 @@ function render(shipments, orders, isAggregate){
       p.tQuarter = trendOf(p.quarterQty, p.lyQuarterQty);
       p.tYear = trendOf(p.yearQty, p.lyYearQty);
       p.tLastMonth = trendOf(p.lastMonthQty, p.lyLastMonthQty);
+      // 單價異常：把這個產品所有出貨紀錄的單價按時間排序、去掉連續重複值，
+      // 拿「最新一次的單價」跟「上一次不同的單價」比較，變動幅度超過門檻就視為異常（可能是打錯、也可能是真的調價，都值得人工確認一次）
+      const sortedPrices = p.priceHistory.slice().sort((a,b) => a.time - b.time);
+      const distinctPrices = [];
+      sortedPrices.forEach(entry => {
+        if(distinctPrices.length === 0 || distinctPrices[distinctPrices.length-1].price !== entry.price){
+          distinctPrices.push(entry);
+        }
+      });
+      if(distinctPrices.length >= 2){
+        const latest = distinctPrices[distinctPrices.length-1];
+        const prev = distinctPrices[distinctPrices.length-2];
+        p.priceChangePct = (latest.price - prev.price) / prev.price * 100;
+        p.prevPrice = prev.price;
+        p.priceChangeDate = new Date(latest.time);
+      } else {
+        p.priceChangePct = null;
+        p.prevPrice = null;
+        p.priceChangeDate = null;
+      }
       // 出貨面規律性：活躍期間（首次~最後一次出貨）內，有出貨的月份佔比多高
       const spanMonths = (p.lastDate.getFullYear()*12 + p.lastDate.getMonth()) - (p.firstDate.getFullYear()*12 + p.firstDate.getMonth()) + 1;
       p.activeSpanMonths = spanMonths;
@@ -1456,6 +1715,18 @@ function render(shipments, orders, isAggregate){
     const surgeItems = activeProducts
       .filter(p => p.activeSpanMonths >= 3 && p.regularity >= REGULARITY_THRESHOLD && p.t30.dir === 'up')
       .sort((a,b) => b.t30.pct - a.t30.pct);
+
+    // ---- 資料健檢：單價異常變動（不限活躍/休眠，只要有價格紀錄就檢查）----
+    // 拿「最新一次的單價」跟「上一次不同的單價」比，變動超過門檻就列出來，可能是打錯字，也可能是真的調價，都值得看一眼
+    const PRICE_CHANGE_THRESHOLD = 15; // %
+    const priceAnomalyItems = products
+      .filter(p => p.priceChangePct !== null && Math.abs(p.priceChangePct) >= PRICE_CHANGE_THRESHOLD)
+      .sort((a,b) => Math.abs(b.priceChangePct) - Math.abs(a.priceChangePct));
+
+    // ---- 資料健檢：有訂數量但沒填單價的訂單列，會讓業績/金額類統計悄悄少算 ----
+    const priceMissingItems = products
+      .filter(p => p.priceMissingCount > 0)
+      .sort((a,b) => b.priceMissingQty - a.priceMissingQty);
 
     let watchHtml = '';
     if(surgeItems.length > 0){
@@ -1574,6 +1845,38 @@ function render(shipments, orders, isAggregate){
     } else {
       currentMergeLog = [];
     }
+    if(priceAnomalyItems.length > 0){
+      watchHtml += `
+        <div class="watchlist-block" style="border-color:var(--brass); border-left-color:var(--brass);">
+          <div class="watchlist-title" style="color:var(--brass);">💰 單價異常變動（${priceAnomalyItems.length}）</div>
+          ${priceAnomalyItems.map(p => `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · ${fmtInt(p.prevPrice)} đ → ${fmtInt(p.latestPrice)} đ（${fmtDateShort(p.priceChangeDate)}）</div>
+                </div>
+                <div class="w-tag" style="color:var(--brass);">${p.priceChangePct > 0 ? '▲' : '▼'} ${Math.abs(p.priceChangePct).toFixed(0)}%</div>
+              </div>
+            `).join('')}
+        </div>
+      `;
+    }
+    if(priceMissingItems.length > 0){
+      watchHtml += `
+        <div class="watchlist-block" style="border-color:var(--seal); border-left-color:var(--seal);">
+          <div class="watchlist-title" style="color:var(--seal);">🩺 資料健檢：有訂數量但沒單價（${priceMissingItems.length}）</div>
+          ${priceMissingItems.map(p => `
+              <div class="watch-row">
+                <div>
+                  <div class="w-name">${escapeHtml(p.name || p.code)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 共 ${p.priceMissingCount} 筆訂單、數量合計 ${fmtInt(p.priceMissingQty)}</div>
+                </div>
+                <div class="w-tag" style="color:var(--seal);">缺單價</div>
+              </div>
+            `).join('')}
+        </div>
+      `;
+    }
     watchlistEl.innerHTML = watchHtml;
 
     document.getElementById('stockListCount').textContent = activeProducts.length + ' 項';
@@ -1585,7 +1888,7 @@ function render(shipments, orders, isAggregate){
     });
 
     const renderRow = (p) => `
-        <div class="stock-row">
+        <div class="stock-row" data-search="${escapeHtml(String(p.name||'').toLowerCase() + ' ' + String(p.code||'').toLowerCase())}">
           <div>
             <div class="s-name">${escapeHtml(p.name || p.code)}</div>
             <div class="s-code">${escapeHtml(p.code)}</div>
@@ -1605,7 +1908,7 @@ function render(shipments, orders, isAggregate){
     CATEGORY_ORDER.forEach(cat => {
       const list = grouped[cat];
       if(!list || list.length === 0) return;
-      html += `<div class="category-header">${cat}（${list.length}項）</div>`;
+      let groupHtml = `<div class="category-header">${cat}（${list.length}項）</div>`;
       if(DYE_CATEGORIES.includes(cat)){
         // 染料類：先依顏色排序（黃橘紅藍丈青紫黑），同色再依近7天用量排
         list.sort((a,b) => {
@@ -1616,9 +1919,11 @@ function render(shipments, orders, isAggregate){
       } else {
         list.sort((a,b) => b.recent7Qty - a.recent7Qty);
       }
-      html += list.map(renderRow).join('');
+      groupHtml += list.map(renderRow).join('');
+      html += `<div class="cat-group">${groupHtml}</div>`;
     });
     stockListEl.innerHTML = html;
+    filterStockList(document.getElementById('stockSearchInput') ? document.getElementById('stockSearchInput').value : '');
   }
 
   const pendingListEl = document.getElementById('pendingList');
