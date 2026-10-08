@@ -480,7 +480,12 @@ const SHEET_NAME_HINT = "訂單追蹤表"; // 優先找這個分頁名稱
    label：畫面上顯示的名稱／query：用來搜尋 Google Drive 檔案名稱的關鍵字（建議用中文客戶名，較不易撞名） */
 const CUSTOMERS = [
   { label: '📊 全部客戶總覽', brandCn: '全部客戶總覽', brandVn: '所有客戶彙整 · 業績總覽', isAggregate: true },
-  { label: '得力 DELICACY', brandCn: '得力 DELICACY', brandVn: 'ĐƠN HÀNG DELICACY · 訂單儀表板', query: 'DELICACY' },
+  { label: '得力 DELICACY', brandCn: '得力 DELICACY', brandVn: 'ĐƠN HÀNG DELICACY · 訂單儀表板', query: 'DELICACY',
+    codeAliases: {
+      // HT-26 bs：代碼常常少打一個4，打成 A271B，正確代碼是 A2714B，兩個其實是同一個產品
+      'A271B': 'A2714B'
+    }
+  },
   { label: '巧良 CHEAU LIANG', brandCn: '巧良 CHEAU LIANG', brandVn: 'ĐƠN HÀNG CHEAU LIANG · 訂單儀表板', query: 'CHEAU LIANG' },
   { label: '強盛 CHYANG SHENG', brandCn: '強盛 CHYANG SHENG', brandVn: 'ĐƠN HÀNG CHYANG SHENG · 訂單儀表板', query: 'CHYANG SHENG' },
   { label: '晶苑 CRYSTAL ELEGANCER', brandCn: '晶苑 CRYSTAL ELEGANCER', brandVn: 'ĐƠN HÀNG CRYSTAL ELEGANCER · 訂單儀表板', query: 'CRYSTAL ELEGANCER',
@@ -654,6 +659,40 @@ function confirmMergeAck(idx){
   labelList.forEach(label => set.add(`${label}::${pairKey}`));
   saveMergeAckSet(set);
   loadData(); // 重新讀取，該筆合併會照常進行，只是不再顯示提醒
+}
+
+/* 已確認的單價異常變動：在「單價異常變動」區塊按下確認後，不再提醒——
+   key 格式為「客戶名稱::代碼/品名::舊單價=>新單價」，連這次的價格組合都寫進key裡，
+   所以之後單價如果「再變一次」（不管是繼續漲還是跌），會是新的 key，照樣會重新跳出來提醒，不會被舊的確認紀錄誤蓋掉 */
+const PRICE_ACK_KEY = 'dashboard_priceAck_v1';
+
+function loadPriceAckSet(){
+  try{
+    const raw = localStorage.getItem(PRICE_ACK_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  }catch(e){ return new Set(); }
+}
+
+function savePriceAckSet(set){
+  try{ localStorage.setItem(PRICE_ACK_KEY, JSON.stringify(Array.from(set))); }catch(e){ console.warn('無法儲存單價異常確認清單', e); }
+}
+
+// 目前畫面上「單價異常變動」清單的暫存（供按鈕點擊時查找對應項目用）
+let currentPriceAnomalyItems = [];
+
+function priceAckKey(p){
+  return `${p.code || p.name}::${p.prevPrice}=>${p.latestPrice}`;
+}
+
+function confirmPriceAck(idx){
+  const p = currentPriceAnomalyItems[idx];
+  if(!p) return;
+  const set = loadPriceAckSet();
+  const pairKey = priceAckKey(p);
+  const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
+  labels.forEach(label => set.add(`${label}::${pairKey}`));
+  savePriceAckSet(set);
+  loadData(); // 重新讀取，這次的異常不再提醒；下次單價再變動會是新的組合，照樣會提醒
 }
 
 /* 停止合作客戶：預設值寫在 CUSTOMERS[].inactive，但也可以在「設定管理」面板裡直接勾選切換，
@@ -1845,21 +1884,34 @@ function render(shipments, orders, isAggregate){
     } else {
       currentMergeLog = [];
     }
-    if(priceAnomalyItems.length > 0){
+    // 篩掉使用者已經按過「確認」的單價異常，不再重複提醒（但下次單價再變動，會是新的組合，照樣會提醒）
+    const priceAckSet = loadPriceAckSet();
+    const visiblePriceAnomalyItems = priceAnomalyItems.filter(p => {
+      const pairKey = priceAckKey(p);
+      const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
+      return !labels.every(label => priceAckSet.has(`${label}::${pairKey}`));
+    });
+    if(visiblePriceAnomalyItems.length > 0){
+      currentPriceAnomalyItems = visiblePriceAnomalyItems;
       watchHtml += `
         <div class="watchlist-block" style="border-color:var(--brass); border-left-color:var(--brass);">
-          <div class="watchlist-title" style="color:var(--brass);">💰 單價異常變動（${priceAnomalyItems.length}）</div>
-          ${priceAnomalyItems.map(p => `
+          <div class="watchlist-title" style="color:var(--brass);">💰 單價異常變動（${visiblePriceAnomalyItems.length}）</div>
+          ${visiblePriceAnomalyItems.map((p, idx) => `
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
                   <div class="w-code">${escapeHtml(p.code)} · ${fmtInt(p.prevPrice)} đ → ${fmtInt(p.latestPrice)} đ（${fmtDateShort(p.priceChangeDate)}）</div>
                 </div>
-                <div class="w-tag" style="color:var(--brass);">${p.priceChangePct > 0 ? '▲' : '▼'} ${Math.abs(p.priceChangePct).toFixed(0)}%</div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <div class="w-tag" style="color:var(--brass);">${p.priceChangePct > 0 ? '▲' : '▼'} ${Math.abs(p.priceChangePct).toFixed(0)}%</div>
+                  <button class="delist-btn" onclick="confirmPriceAck(${idx})">確認，不再提醒</button>
+                </div>
               </div>
             `).join('')}
         </div>
       `;
+    } else {
+      currentPriceAnomalyItems = [];
     }
     if(priceMissingItems.length > 0){
       watchHtml += `
