@@ -1478,16 +1478,6 @@ function render(shipments, orders, isAggregate){
     // 上個月（跟去年同月比較）
     if(iY===pmY && iM===pmM) pm.lastMonthQty += i.qty;
     if(iY===pmY-1 && iM===pmM) pm.lyLastMonthQty += i.qty;
-    // 品名／單價都追蹤「最新一筆出貨」的版本，避免代碼更新對照表套用後，畫面還顯示舊品名
-    if(!pm.latestNameDate || i.dateObj > pm.latestNameDate){
-      if(i.name) pm.name = i.name;
-      pm.latestNameDate = i.dateObj;
-    }
-    if(i.price > 0 && (!pm.latestPriceDate || i.dateObj > pm.latestPriceDate)){
-      pm.latestPrice = i.price;
-      pm.latestPriceDate = i.dateObj;
-    }
-    if(i.price > 0) pm.priceHistory.push({ price: i.price, time: i.dateObj.getTime() });
   });
   // 還欠數量／訂單筆數：維持看訂單本身（跟出貨無關，這部分邏輯不變）
   orders.forEach(i => {
@@ -1506,6 +1496,18 @@ function render(shipments, orders, isAggregate){
       if(!pm.firstOrderDate || i.dateObj < pm.firstOrderDate) pm.firstOrderDate = i.dateObj;
       if(!pm.lastOrderDate || i.dateObj > pm.lastOrderDate) pm.lastOrderDate = i.dateObj;
       if(i.dateObj >= thirtyDaysAgo && i.dateObj <= today) pm.recentOrder30Qty += i.qty;
+      // 品名／單價都用「訂單日期最新的那一筆」判斷，而不是出貨日期——
+      // 出貨常常會因為物流集中出貨而延後或跟別筆訂單撞同一天，用出貨日期來判斷「目前單價」可能讓舊訂單的價格贏過真正最新下單的價格；
+      // 訂單日期才是「這個價格是什麼時候談定的」唯一可靠依據
+      if(!pm.latestNameDate || i.dateObj > pm.latestNameDate){
+        if(i.name) pm.name = i.name;
+        pm.latestNameDate = i.dateObj;
+      }
+      if(i.price > 0 && (!pm.latestPriceDate || i.dateObj > pm.latestPriceDate)){
+        pm.latestPrice = i.price;
+        pm.latestPriceDate = i.dateObj;
+      }
+      if(i.price > 0) pm.priceHistory.push({ price: i.price, time: i.dateObj.getTime() });
     }
   });
 
@@ -1841,7 +1843,7 @@ function render(shipments, orders, isAggregate){
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
-                  <div class="w-code">${escapeHtml(p.code)} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 單價 ${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'} · 全期月均 ${fmtInt(p.fullAvg)}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:10px;">
                   <div class="w-tag" style="color:var(--ink-dim);">已 ${p.daysSinceLastOrder} 天沒下單 · ${p.daysSinceLastShip} 天沒出貨</div>
