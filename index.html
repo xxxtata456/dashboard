@@ -467,6 +467,12 @@
       <h2>最近一次總覽讀取失敗紀錄</h2>
     </div>
     <div class="ledger" id="settingsFetchFailuresList"></div>
+
+    <div class="section-title" style="margin-top:24px;">
+      <span class="num">E</span>
+      <h2>資料來源檔案對照</h2>
+    </div>
+    <div class="ledger" id="settingsSourceFilesList"></div>
   </div>
 </div>
 
@@ -727,6 +733,19 @@ function toggleCustomerInactive(label){
   renderSettingsPanel();
 }
 
+/* 各客戶「實際抓到的 Drive 檔案」紀錄：用來檢查有沒有抓錯檔案、或兩家客戶抓到同一個檔案（資料夾在一起） */
+const SOURCE_FILES_KEY = 'dashboard_sourceFiles_v1';
+
+function loadSourceFiles(){
+  try{ const raw = localStorage.getItem(SOURCE_FILES_KEY); return raw ? JSON.parse(raw) : {}; }catch(e){ return {}; }
+}
+
+function recordSourceFile(label, query, info){
+  const all = loadSourceFiles();
+  all[label] = { query, id: info.id, name: info.name, modifiedTime: info.modifiedTime, candidates: info.candidates, when: new Date().toISOString() };
+  try{ localStorage.setItem(SOURCE_FILES_KEY, JSON.stringify(all)); }catch(e){ console.warn('無法儲存來源檔案紀錄', e); }
+}
+
 /* 全部客戶總覽最近一次讀取失敗的紀錄，供「設定管理」面板顯示原因，方便排查 */
 const LAST_FETCH_FAILURES_KEY = 'dashboard_lastFetchFailures_v1';
 
@@ -855,6 +874,33 @@ function renderSettingsPanel(){
         `).join('')}
     `;
   }
+
+  // ---- E. 資料來源檔案對照：每家客戶實際抓到哪個 Drive 檔案，並標出可疑情況 ----
+  const sourceFiles = loadSourceFiles();
+  const sourceEl = document.getElementById('settingsSourceFilesList');
+  const labels = Object.keys(sourceFiles);
+  if(labels.length === 0){
+    sourceEl.innerHTML = '<div class="empty">還沒有讀取紀錄；切換到客戶或跑一次「全部客戶總覽」之後這裡就會出現</div>';
+  } else {
+    // 兩家以上客戶抓到同一個檔案 id → 資料一定夾在一起
+    const byId = {};
+    labels.forEach(l => { (byId[sourceFiles[l].id] = byId[sourceFiles[l].id] || []).push(l); });
+    sourceEl.innerHTML = labels.map(l => {
+      const f = sourceFiles[l];
+      const sharers = byId[f.id].filter(x => x !== l);
+      const warns = [];
+      if(sharers.length > 0) warns.push('⚠ 跟「' + sharers.join('、') + '」抓到同一個檔案，資料會夾在一起');
+      if(f.candidates && f.candidates.length > 1) warns.push('⚠ 有 ' + f.candidates.length + ' 個檔名都符合關鍵字，目前取最近修改的：' + f.candidates.join(' ｜ '));
+      return `
+        <div class="watch-row">
+          <div>
+            <div class="w-name">${escapeHtml(l)}</div>
+            <div class="w-code">搜尋「${escapeHtml(f.query)}」→ ${escapeHtml(f.name)}</div>
+            ${warns.map(w => `<div class="w-code" style="color:var(--seal);">${escapeHtml(w)}</div>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
+  }
 }
 
 /* 依已保存的順序（若有）排列下拉選單，若尚未存過排序則用原始順序 */
@@ -950,8 +996,9 @@ async function loadData(){
   }
   setSyncStatus('loading', '讀取中…');
   try{
-    const fileId = await findFile(currentCustomer.query);
-    const buf = await downloadFile(fileId);
+    const fileInfo = await findFile(currentCustomer.query);
+    recordSourceFile(currentCustomer.label, currentCustomer.query, fileInfo);
+    const buf = await downloadFile(fileInfo.id);
     const workbook = XLSX.read(buf, {type:'array', cellDates:true});
     const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -982,8 +1029,9 @@ async function loadAllCustomers(){
   const CONCURRENCY = 6;
   const fetchOne = async (c) => {
     try{
-      const fileId = await findFile(c.query);
-      const buf = await downloadFile(fileId);
+      const fileInfo = await findFile(c.query);
+      recordSourceFile(c.label, c.query, fileInfo);
+      const buf = await downloadFile(fileInfo.id);
       const workbook = XLSX.read(buf, {type:'array', cellDates:true});
       const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
@@ -1027,9 +1075,10 @@ async function findFile(query){
   if(!res.ok) throw new Error('搜尋檔案失敗 (HTTP ' + res.status + ')');
   const data = await res.json();
   if(!data.files || data.files.length === 0) throw new Error('找不到名稱包含「' + query + '」的檔案');
-  // 取最近修改的那個
+  // 取最近修改的那個；同時把「所有符合的檔名」一起回傳，方便檢查是不是有多個檔案都符合同一個關鍵字
   data.files.sort((a,b) => new Date(b.modifiedTime) - new Date(a.modifiedTime));
-  return data.files[0].id;
+  const best = data.files[0];
+  return { id: best.id, name: best.name, modifiedTime: best.modifiedTime, candidates: data.files.map(f => f.name) };
 }
 
 async function downloadFile(fileId){
@@ -1120,11 +1169,13 @@ function parseLedger(rows){
     const date = dateObj ? fmtDateShort(dateObj) : String(rawDate||'').trim();
 
     // 出貨欄位的解析獨立於「這一列訂數量／還欠是否為0」，避免訂數量填0但實際有出貨紀錄的列被整列漏掉
+    let lastShipDateObj = null; // 這一列訂單最後一次出貨的日期，用來算「停滯天數」
     for(const sc of shipCols){
       const raw = row[sc.idx];
       if(raw === '' || raw === null || raw === undefined) continue;
       const shipQty = parseFloat(String(raw).replace(/,/g,''));
       if(!shipQty || shipQty <= 0) continue;
+      if(sc.dateObj && (!lastShipDateObj || sc.dateObj > lastShipDateObj)) lastShipDateObj = sc.dateObj;
       shipments.push({
         code, name, price,
         qty: shipQty,
@@ -1139,7 +1190,7 @@ function parseLedger(rows){
     // （上面的出貨欄位已經解析完成，不受影響）
     if(qty === 0 && owed === 0) continue;
 
-    orders.push({ code, name, price, qty, owed, date, monthKey, dateObj });
+    orders.push({ code, name, price, qty, owed, date, monthKey, dateObj, lastShipDateObj });
   }
   return { orders, shipments };
 }
@@ -1986,7 +2037,12 @@ function render(shipments, orders, isAggregate){
     pendingListEl.innerHTML = '<div class="empty">目前沒有待出貨品項</div>';
   } else {
     pendingListEl.innerHTML = pending
-      .map(i => ({ i, stalledDays: i.dateObj ? Math.floor((today - i.dateObj) / 86400000) : null }))
+      // 停滯天數＝距離「最後一次出貨」幾天；還沒出過任何貨的才從訂單日期算起
+      // （部分出貨的單如果一律從訂單日期算，昨天剛出過貨也會顯示停滯好幾週，會誤導）
+      .map(i => {
+        const base = i.lastShipDateObj || i.dateObj;
+        return { i, stalledDays: base ? Math.max(0, Math.floor((today - base) / 86400000)) : null };
+      })
       // 越久沒出貨的排越下面；沒有日期可判斷的（stalledDays 為 null）視為最新，排最上面
       .sort((a,b) => (a.stalledDays ?? -1) - (b.stalledDays ?? -1))
       .map(({i, stalledDays}) => `
