@@ -171,7 +171,7 @@
   /* 月度趨勢 */
   .trend-row{
     display:grid;
-    grid-template-columns:90px 1fr auto 56px;
+    grid-template-columns:90px 1fr auto 88px;
     gap:12px;
     align-items:center;
     padding:11px 4px;
@@ -334,6 +334,7 @@
     color:var(--ink); padding:16px; border-radius:var(--radius);
     font-size:13px; line-height:1.7; margin-bottom:20px; white-space:pre-wrap;
   }
+  body.is-loading .hero, body.is-loading #pendingList, body.is-loading #panelRevenue, body.is-loading #panelQty{ opacity:.4; pointer-events:none; transition:opacity .2s; }
 </style>
 </head>
 <body>
@@ -438,10 +439,6 @@
     </div>
   </div>
 
-  <div class="foot">
-    <button class="reload" id="reloadBtn">重新整理資料</button>
-  </div>
-
   <!-- ===== 設定管理分頁 ===== -->
   <div id="panelSettings" style="display:none;">
     <div class="section-title">
@@ -473,6 +470,10 @@
       <h2>資料來源檔案對照</h2>
     </div>
     <div class="ledger" id="settingsSourceFilesList"></div>
+  </div>
+
+  <div class="foot">
+    <button class="reload" id="reloadBtn">重新整理資料</button>
   </div>
 </div>
 
@@ -631,7 +632,7 @@ function confirmDelistItem(idx){
   const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
   labels.forEach(label => set.add(`${label}::${key}`));
   saveDelistedSet(set);
-  loadData(); // 重新讀取並套用最新的下架清單
+  rerender(); // 用已讀取的資料重新套用，不需重抓 Drive
 }
 
 /* 已確認的自動合併紀錄：在「已自動合併的代碼」區塊按下確認後，永久記住不再提醒
@@ -664,7 +665,7 @@ function confirmMergeAck(idx){
   const labelList = labels.size > 0 ? Array.from(labels) : ['__unknown__'];
   labelList.forEach(label => set.add(`${label}::${pairKey}`));
   saveMergeAckSet(set);
-  loadData(); // 重新讀取，該筆合併會照常進行，只是不再顯示提醒
+  rerender();
 }
 
 /* 已確認的單價異常變動：在「單價異常變動」區塊按下確認後，不再提醒——
@@ -698,7 +699,7 @@ function confirmPriceAck(idx){
   const labels = p.customerLabels && p.customerLabels.size > 0 ? Array.from(p.customerLabels) : ['__unknown__'];
   labels.forEach(label => set.add(`${label}::${pairKey}`));
   savePriceAckSet(set);
-  loadData(); // 重新讀取，這次的異常不再提醒；下次單價再變動會是新的組合，照樣會提醒
+  rerender();
 }
 
 /* 停止合作客戶：預設值寫在 CUSTOMERS[].inactive，但也可以在「設定管理」面板裡直接勾選切換，
@@ -770,6 +771,7 @@ function restoreDelistItem(idx){
   const set = loadDelistedSet();
   set.delete(rawKey);
   saveDelistedSet(set);
+  rerender();
   renderSettingsPanel();
 }
 
@@ -779,6 +781,7 @@ function restoreMergeAck(idx){
   const set = loadMergeAckSet();
   set.delete(rawKey);
   saveMergeAckSet(set);
+  rerender();
   renderSettingsPanel();
 }
 
@@ -934,7 +937,7 @@ function populateCustomerSelect(){
   }
   orderedIdx = sinkInactive(orderedIdx, aggregateIdx);
   sel.innerHTML = orderedIdx.map(i => `<option value="${i}">${escapeHtml(optionLabel(CUSTOMERS[i]))}</option>`).join('');
-  sel.value = 1;
+  sel.value = String(Math.max(CUSTOMERS.indexOf(currentCustomer), 0));
 }
 
 /* 依「各客戶業績排行」的順序，重新排列選單的顯示順序（value 仍對應 CUSTOMERS 原始索引，不影響其他邏輯），並永久保存 */
@@ -961,20 +964,49 @@ function switchCustomer(indexStr){
   loadData();
 }
 
+/* ===== 登入權杖：1 小時過期，自動續期（需在使用者操作的同一個事件裡呼叫，否則彈窗可能被擋）===== */
+let tokenExpiresAt = 0;
+let tokenResolve = null, tokenReject = null, tokenRefreshPromise = null;
+function refreshToken(){
+  if(tokenRefreshPromise) return tokenRefreshPromise;
+  tokenRefreshPromise = new Promise((res, rej) => {
+    tokenResolve = res; tokenReject = rej;
+    try{ tokenClient.requestAccessToken({ prompt: '' }); }catch(e){ rej(e); }
+  }).finally(() => { tokenRefreshPromise = null; tokenResolve = tokenReject = null; });
+  return tokenRefreshPromise;
+}
+async function driveFetch(url){
+  const go = () => fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
+  let res = await go();
+  if(res.status === 401){ await refreshToken(); res = await go(); }
+  return res;
+}
+
 window.onload = () => {
   populateCustomerSelect();
+  if(typeof google === 'undefined' || !google.accounts){
+    document.getElementById('gateStatus').textContent = '無法載入 Google 登入元件（可能被廣告攔截或網路問題），請重新整理頁面。';
+    return;
+  }
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
     scope: SCOPES,
     callback: (resp) => {
       if (resp.error) {
+        if(tokenReject){ tokenReject(new Error('登入已過期且自動續期失敗，請重新整理頁面再登入')); return; }
         document.getElementById('gateStatus').textContent = '登入失敗，請再試一次。';
         return;
       }
       accessToken = resp.access_token;
+      tokenExpiresAt = Date.now() + ((resp.expires_in || 3600) - 120) * 1000;
+      if(tokenResolve){ tokenResolve(); return; } // 續期，不重跑登入流程
       document.getElementById('gate').style.display = 'none';
       document.getElementById('dash').style.display = 'block';
       loadData();
+    },
+    error_callback: () => {
+      if(tokenReject){ tokenReject(new Error('登入視窗被關閉或被瀏覽器擋住，無法自動續期，請再按一次「重新整理資料」')); return; }
+      document.getElementById('gateStatus').textContent = '登入視窗被關閉或被瀏覽器擋住，請再試一次。';
     }
   });
 
@@ -988,59 +1020,87 @@ window.onload = () => {
   });
 };
 
+/* 讀取流程的版本號：連續切換客戶時，只有最後一次的結果會被畫出來 */
+let loadSeq = 0;
+let lastData = null; // 最近一次讀到的資料，供「確認／復原」按鈕直接重新 render，不用重抓 Drive
+function setLoading(on){ document.body.classList.toggle('is-loading', on); }
+function rerender(){ if(lastData) render(lastData.shipments, lastData.orders, lastData.isAggregate); }
+
+function parseWorkbookFor(c, buf){
+  const workbook = XLSX.read(buf, {type:'array', cellDates:true});
+  const warnings = [];
+  let sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT));
+  if(!sheetName){
+    sheetName = workbook.SheetNames[0];
+    warnings.push(`找不到含「${SHEET_NAME_HINT}」的分頁，改讀第一個分頁「${sheetName}」`);
+  }
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {header:1, defval:''});
+  const { orders, shipments, warnings: w2 } = parseLedger(rows);
+  applyCodeAliases(orders, c.codeAliases);
+  applyCodeAliases(shipments, c.codeAliases);
+  orders.forEach(it => it.customerLabel = c.label);
+  shipments.forEach(it => it.customerLabel = c.label);
+  return { orders, shipments, warnings: [...warnings, ...w2] };
+}
+
+async function ensureToken(){
+  // 必須在使用者點擊的同一個事件流程裡、第一個 await 之前呼叫，彈窗才不會被瀏覽器擋
+  if(Date.now() > tokenExpiresAt) await refreshToken();
+}
+
 async function loadData(){
+  const seq = ++loadSeq;
   document.getElementById('errBox').style.display = 'none';
-  if(currentCustomer.isAggregate){
-    await loadAllCustomers();
+  setLoading(true);
+  try{
+    await ensureToken();
+  }catch(e){
+    if(seq === loadSeq){ setLoading(false); setSyncStatus('error', '登入已過期'); showError(e.message || String(e)); }
     return;
   }
+  if(currentCustomer.isAggregate){
+    await loadAllCustomers(seq);
+    return;
+  }
+  const c = currentCustomer;
   setSyncStatus('loading', '讀取中…');
   try{
-    const fileInfo = await findFile(currentCustomer.query);
-    recordSourceFile(currentCustomer.label, currentCustomer.query, fileInfo);
-    const buf = await downloadFile(fileInfo.id);
-    const workbook = XLSX.read(buf, {type:'array', cellDates:true});
-    const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
-    const { orders, shipments } = parseLedger(rows);
-    applyCodeAliases(orders, currentCustomer.codeAliases);
-    applyCodeAliases(shipments, currentCustomer.codeAliases);
-    orders.forEach(it => it.customerLabel = currentCustomer.label);
-    shipments.forEach(it => it.customerLabel = currentCustomer.label);
+    const fileInfo = await findFile(c.query);
+    if(seq !== loadSeq) return;
+    recordSourceFile(c.label, c.query, fileInfo);
+    const buf = await downloadFile(fileInfo);
+    if(seq !== loadSeq) return;
+    const { orders, shipments, warnings } = parseWorkbookFor(c, buf);
     render(shipments, orders, false);
+    if(warnings.length) showError('⚠ 資料格式提醒：\n' + warnings.join('\n'));
     setSyncStatus('done', '資料已讀取完畢');
   } catch(err){
+    if(seq !== loadSeq) return;
     console.error(err);
     setSyncStatus('error', '讀取失敗');
-    showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + currentCustomer.query + '」，且你的 Google 帳號有檢視權限。');
+    showError('讀取資料時發生問題：\n' + (err.message || err) + '\n\n請確認檔案名稱包含「' + c.query + '」，且你的 Google 帳號有檢視權限。');
+  } finally {
+    if(seq === loadSeq) setLoading(false);
   }
 }
 
-async function loadAllCustomers(){
+async function loadAllCustomers(seq){
   // 已停止合作的客戶不再讀取，加快總覽速度；資料還是保留在他們自己的分頁裡，隨時可以手動點進去看
   const realCustomers = CUSTOMERS.filter(c => !c.isAggregate && !isCustomerInactive(c));
   const allOrders = [];
   const allShipments = [];
   const failed = [];
+  const warned = [];
   let completed = 0;
-  // 同時開幾個併發請求，而不是一家一家排隊等——只要別把並發數開太高（避免瞬間打爆 Drive API 的速率限制），
-  // 6 家同時抓，總時間大概可以縮到原本的 1/5~1/6
   const CONCURRENCY = 6;
+  setSyncStatus('loading', `讀取中…（0/${realCustomers.length}）`);
   const fetchOne = async (c) => {
     try{
       const fileInfo = await findFile(c.query);
       recordSourceFile(c.label, c.query, fileInfo);
-      const buf = await downloadFile(fileInfo.id);
-      const workbook = XLSX.read(buf, {type:'array', cellDates:true});
-      const sheetName = workbook.SheetNames.find(n => n.includes(SHEET_NAME_HINT)) || workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
-      const { orders, shipments } = parseLedger(rows);
-      applyCodeAliases(orders, c.codeAliases);
-      applyCodeAliases(shipments, c.codeAliases);
-      orders.forEach(it => it.customerLabel = c.label);
-      shipments.forEach(it => it.customerLabel = c.label);
+      const buf = await downloadFile(fileInfo);
+      const { orders, shipments, warnings } = parseWorkbookFor(c, buf);
+      warnings.forEach(w => warned.push(`${c.label}：${w}`));
       allOrders.push(...orders);
       allShipments.push(...shipments);
     } catch(err){
@@ -1048,49 +1108,71 @@ async function loadAllCustomers(){
       failed.push({ label: c.label, message: (err && err.message) ? err.message : String(err) });
     } finally {
       completed++;
-      setSyncStatus('loading', `讀取中…（${completed}/${realCustomers.length}）`);
+      if(seq === loadSeq) setSyncStatus('loading', `讀取中…（${completed}/${realCustomers.length}）`);
     }
   };
   let cursor = 0;
   const worker = async () => {
-    while(cursor < realCustomers.length){
+    while(cursor < realCustomers.length && seq === loadSeq){
       const c = realCustomers[cursor++];
       await fetchOne(c);
     }
   };
-  const workers = Array.from({length: Math.min(CONCURRENCY, realCustomers.length)}, worker);
-  await Promise.all(workers);
-  saveLastFetchFailures(failed);
-  if(failed.length > 0){
-    showError('以下客戶讀取失敗，總覽數字不包含這些客戶（詳細原因可以到「設定管理」分頁查看）：\n' + failed.map(f=>f.label).join('、'));
+  await Promise.all(Array.from({length: Math.min(CONCURRENCY, realCustomers.length)}, worker));
+  if(seq !== loadSeq) return; // 期間使用者已切換到別的客戶，這次的結果作廢
+  try{
+    saveLastFetchFailures(failed);
+    const msgs = [];
+    if(failed.length > 0) msgs.push('以下客戶讀取失敗，總覽數字不包含這些客戶（詳細原因可以到「設定管理」分頁查看）：\n' + failed.map(f=>f.label).join('、'));
+    if(warned.length > 0) msgs.push('⚠ 資料格式提醒：\n' + warned.join('\n'));
+    if(msgs.length) showError(msgs.join('\n\n'));
+    render(allShipments, allOrders, true);
+    setSyncStatus(failed.length > 0 ? 'error' : 'done', failed.length > 0 ? `資料已讀取完畢（${failed.length} 家失敗）` : '全部客戶資料已讀取完畢');
+  } finally {
+    setLoading(false);
   }
-  render(allShipments, allOrders, true);
-  setSyncStatus(failed.length > 0 ? 'error' : 'done', failed.length > 0 ? `資料已讀取完畢（${failed.length} 家失敗）` : '全部客戶資料已讀取完畢');
 }
+
+const SHEET_MIMES = [
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+  'application/vnd.ms-excel.sheet.macroEnabled.12',
+  'application/vnd.google-apps.spreadsheet'
+];
 
 async function findFile(query){
-  const q = encodeURIComponent(`name contains '${query}' and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=10`;
-  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
-  if(!res.ok) throw new Error('搜尋檔案失敗 (HTTP ' + res.status + ')');
-  const data = await res.json();
-  if(!data.files || data.files.length === 0) throw new Error('找不到名稱包含「' + query + '」的檔案');
-  // 取最近修改的那個；同時把「所有符合的檔名」一起回傳，方便檢查是不是有多個檔案都符合同一個關鍵字
-  data.files.sort((a,b) => new Date(b.modifiedTime) - new Date(a.modifiedTime));
-  const best = data.files[0];
-  return { id: best.id, name: best.name, modifiedTime: best.modifiedTime, candidates: data.files.map(f => f.name) };
+  // 檔名可能是 NFC 或 NFD 編碼（越南文變音符號常見），兩種都試；只取 Excel／Google 試算表，排除資料夾與 ~$ 暫存檔
+  const variants = Array.from(new Set([query.normalize('NFC'), query.normalize('NFD')]));
+  let files = [];
+  for(const v of variants){
+    const esc = v.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const q = encodeURIComponent(`name contains '${esc}' and trashed = false and mimeType != 'application/vnd.google-apps.folder'`);
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime%20desc&fields=files(id,name,mimeType,modifiedTime)&pageSize=30&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`;
+    const res = await driveFetch(url);
+    if(!res.ok) throw new Error('搜尋檔案失敗 (HTTP ' + res.status + ')');
+    const data = await res.json();
+    files = (data.files || []).filter(f => SHEET_MIMES.includes(f.mimeType) && !f.name.startsWith('~$'));
+    if(files.length > 0) break;
+  }
+  if(files.length === 0) throw new Error('找不到名稱包含「' + query + '」的 Excel／試算表檔案');
+  files.sort((a,b) => new Date(b.modifiedTime) - new Date(a.modifiedTime));
+  const best = files[0];
+  return { id: best.id, name: best.name, mimeType: best.mimeType, modifiedTime: best.modifiedTime, candidates: files.map(f => f.name) };
 }
 
-async function downloadFile(fileId){
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` }});
+async function downloadFile(fileInfo){
+  const isGSheet = fileInfo.mimeType === 'application/vnd.google-apps.spreadsheet';
+  const url = isGSheet
+    ? `https://www.googleapis.com/drive/v3/files/${fileInfo.id}/export?mimeType=${encodeURIComponent(SHEET_MIMES[0])}&supportsAllDrives=true`
+    : `https://www.googleapis.com/drive/v3/files/${fileInfo.id}?alt=media&supportsAllDrives=true`;
+  const res = await driveFetch(url);
   if(!res.ok){
     let detail = '';
     try{
       const errJson = await res.json();
       detail = errJson.error ? (errJson.error.message || JSON.stringify(errJson.error)) : JSON.stringify(errJson);
     }catch(e){
-      try{ detail = await res.text(); }catch(e2){ detail = '(無法讀取錯誤內容)'; }
+      detail = '(無法讀取錯誤內容)';
     }
     throw new Error(`下載檔案失敗 (HTTP ${res.status})\n詳細原因：${detail}`);
   }
@@ -1116,11 +1198,13 @@ function applyCodeAliases(records, aliases){
 function parseLedger(rows){
   let headerRowIdx = -1;
   let headerRow = null;
+  let headerRaw = null;
   for(let i=0;i<Math.min(rows.length, 15);i++){
     const row = rows[i].map(c => String(c));
     if(row.some(c => c.includes('訂單號碼') || c.includes('代碼'))){
       headerRowIdx = i;
       headerRow = row;
+      headerRaw = rows[i]; // 保留原始值（Date／數字），日期表頭才不會被字串化後認不出來
       break;
     }
   }
@@ -1144,14 +1228,21 @@ function parseLedger(rows){
 
   // 出貨欄位：分隔線之後、表頭能解析成日期的欄位，每一欄代表一個出貨日
   const shipCols = [];
+  const unparsedHeaders = [];
   if(colDivider >= 0){
     for(let c = colDivider+1; c < headerRow.length; c++){
-      const d = toDateObj(headerRow[c]);
+      const d = toDateObj(headerRaw[c]);
+      if(!d && String(headerRow[c]).trim() !== '') unparsedHeaders.push(String(headerRow[c]).trim());
       if(d){
         shipCols.push({ idx:c, dateObj:d, monthKey:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, dateStr: fmtDateShort(d) });
       }
     }
   }
+
+  const warnings = [];
+  if(colDivider < 0) warnings.push('找不到「////////」分隔線，出貨紀錄全部沒有讀到（業績會是 0）');
+  else if(shipCols.length === 0) warnings.push('分隔線後面沒有可辨識的出貨日期欄位，出貨紀錄全部沒有讀到');
+  if(unparsedHeaders.length > 0) warnings.push(`分隔線後有 ${unparsedHeaders.length} 欄表頭無法辨識為日期（${unparsedHeaders.slice(0,3).join('、')}${unparsedHeaders.length>3?'…':''}），那幾欄的出貨沒有計入`);
 
   const orders = [];
   const shipments = [];
@@ -1160,6 +1251,8 @@ function parseLedger(rows){
     const code = colCode>=0 ? String(row[colCode]||'').trim() : '';
     const name = colName>=0 ? String(row[colName]||'').trim() : '';
     if(!code && !name) continue;
+    // 合計／小計列不是真正的訂單，否則營收會被重複計算
+    if(/^\s*(合計|合计|總計|总计|小計|小计|total|subtotal|sub-total|tổng)/i.test(name) || /^\s*(合計|合计|總計|总计|小計|小计|total|subtotal|sub-total|tổng)/i.test(code)) continue;
     const price = colPrice>=0 ? parseFloat(String(row[colPrice]).replace(/,/g,'')) || 0 : 0;
     const qty   = colQty>=0 ? parseFloat(String(row[colQty]).replace(/,/g,'')) || 0 : 0;
     const owed  = colOwed>=0 ? parseFloat(String(row[colOwed]).replace(/,/g,'')) || 0 : 0;
@@ -1192,27 +1285,36 @@ function parseLedger(rows){
 
     orders.push({ code, name, price, qty, owed, date, monthKey, dateObj, lastShipDateObj });
   }
-  return { orders, shipments };
+  return { orders, shipments, warnings };
 }
 
 /* 將儲存格原始值（可能是 Date 物件／Excel 序號／文字字串）統一轉成 Date 物件，失敗回傳 null */
 function toDateObj(raw){
-  if(!raw && raw !== 0) return null;
-  if(raw instanceof Date && !isNaN(raw)) return raw;
+  if(raw === null || raw === undefined || raw === '') return null;
+  const mk = (y, mo, d) => (mo < 1 || mo > 12 || d < 1 || d > 31) ? null : new Date(y, mo-1, d);
+  if(raw instanceof Date){
+    if(isNaN(raw)) return null;
+    // SheetJS 的 Date 在部分時區會有秒級偏移（例如變成前一天 23:59:xx），加 6 小時再取日期來校正
+    const t = new Date(raw.getTime() + 6*3600*1000);
+    return new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  }
   if(typeof raw === 'number'){
-    // Excel 序號日期（1900 曆制），轉換為 JS Date
-    const ms = Math.round((raw - 25569) * 86400 * 1000);
-    const d = new Date(ms);
-    return isNaN(d) ? null : d;
+    if(raw < 20000 || raw > 80000) return null; // 不像 Excel 日期序號的數字不當日期
+    const d = new Date(Math.round((Math.floor(raw) - 25569) * 86400000));
+    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   }
   const str = String(raw).trim();
-  const m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
-  if(!m) return null;
-  const day = parseInt(m[1],10), mon = parseInt(m[2],10);
-  let yr = parseInt(m[3],10);
-  if(yr < 100) yr += 2000; // 兩位數年份（例如 25 → 2025）
-  if(mon < 1 || mon > 12 || day < 1 || day > 31) return null;
-  return new Date(yr, mon-1, day);
+  // 年在前：2026/01/05、2026-01-05
+  let m = str.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+  if(m) return mk(+m[1], +m[2], +m[3]);
+  // 日/月/年：05/01/2026、5-1-26
+  m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})(?!\d)/);
+  if(m){
+    let yr = +m[3];
+    if(yr < 100) yr += 2000;
+    return mk(yr, +m[2], +m[1]);
+  }
+  return null;
 }
 
 function monthLabel(key){
@@ -1262,12 +1364,15 @@ function switchMainTab(mode){
 }
 
 function fmtInt(n){ return Math.round(n).toLocaleString('zh-Hant'); }
+// 單價：整數照舊，有小數時保留到小數點後 2 位，避免 2.8→3.2 被四捨五入成 3→3
+function fmtPrice(n){ return Number.isInteger(n) ? fmtInt(n) : Number(n).toLocaleString('zh-Hant', {maximumFractionDigits:2}); }
 
 function fmtDateShort(d){
   return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function render(shipments, orders, isAggregate){
+  lastData = { shipments, orders, isAggregate };
   const pending = orders.filter(i => i.owed > 0);
   const pendingQty = pending.reduce((s,i)=>s+i.owed,0);
 
@@ -1281,7 +1386,8 @@ function render(shipments, orders, isAggregate){
     dataRangeEl.textContent = '';
   } else {
     const earliest = datedItems.reduce((min,i) => i.dateObj < min ? i.dateObj : min, datedItems[0].dateObj);
-    dataRangeEl.textContent = `資料涵蓋：${earliest.getFullYear()}年${earliest.getMonth()+1}月起`;
+    const inactiveN = isAggregate ? CUSTOMERS.filter(c => !c.isAggregate && isCustomerInactive(c)).length : 0;
+    dataRangeEl.textContent = `資料涵蓋：${earliest.getFullYear()}年${earliest.getMonth()+1}月起` + (inactiveN > 0 ? `（不含 ${inactiveN} 家已停止合作客戶）` : '');
   }
 
   /* ---- 各客戶業績排行（僅在「全部客戶總覽」模式顯示）---- */
@@ -1341,9 +1447,11 @@ function render(shipments, orders, isAggregate){
   const yearTotal = sumIf(i => i.dateObj.getFullYear()===curY);
 
   // 去年同期比較，抓淡旺季用
-  const lyMonthTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && i.dateObj.getMonth()===curM);
-  const lyQuarterTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && Math.floor(i.dateObj.getMonth()/3)===curQ);
-  const lyYearTotal = sumIf(i => i.dateObj.getFullYear()===curY-1);
+  // 去年同期＝去年「同月同日以前」，跟今年的「至今」對齊，避免拿半個月去比整個月
+  const lyCutoff = new Date(curY-1, today.getMonth(), today.getDate(), 23,59,59,999);
+  const lyMonthTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && i.dateObj.getMonth()===curM && i.dateObj<=lyCutoff);
+  const lyQuarterTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && Math.floor(i.dateObj.getMonth()/3)===curQ && i.dateObj<=lyCutoff);
+  const lyYearTotal = sumIf(i => i.dateObj.getFullYear()===curY-1 && i.dateObj<=lyCutoff);
 
   // 上個月（跟去年同月比較，抓淡旺季用）
   const pmDate = new Date(curY, curM-1, 1);
@@ -1373,7 +1481,7 @@ function render(shipments, orders, isAggregate){
   // 移動天數制：近30/90/180/365天（以今天為基準往回推）
   const daysAgo = (n) => {
     const d = new Date(today);
-    d.setDate(d.getDate() - n);
+    d.setDate(d.getDate() - (n-1)); // 含今天共 n 天
     d.setHours(0,0,0,0);
     return d;
   };
@@ -1388,7 +1496,10 @@ function render(shipments, orders, isAggregate){
   // 本月業績卡（沿用月度比較，維持在頂部 hero）
   document.getElementById('monthRevenue').innerHTML = fmtInt(monthTotal) + '<small>đ</small>';
   const prevMonthDate = new Date(curY, curM-1, 1);
-  const prevMonthTotal = sumIf(i => i.dateObj.getFullYear()===prevMonthDate.getFullYear() && i.dateObj.getMonth()===prevMonthDate.getMonth());
+  // 上月「同日以前」，跟本月至今對齊
+  const prevDim = new Date(curY, curM, 0).getDate();
+  const prevCut = new Date(curY, curM-1, Math.min(today.getDate(), prevDim), 23,59,59,999);
+  const prevMonthTotal = sumIf(i => i.dateObj.getFullYear()===prevMonthDate.getFullYear() && i.dateObj.getMonth()===prevMonthDate.getMonth() && i.dateObj<=prevCut);
   if(prevMonthTotal > 0 || monthTotal > 0){
     const diff = monthTotal - prevMonthTotal;
     const pct = prevMonthTotal !== 0 ? (diff/prevMonthTotal*100) : 0;
@@ -1396,7 +1507,7 @@ function render(shipments, orders, isAggregate){
     const arrow = diff > 0 ? '▲' : (diff < 0 ? '▼' : '—');
     document.getElementById('momSub').innerHTML =
       prevMonthTotal !== 0
-        ? `<span class="mom-chip ${dir}">${arrow} ${Math.abs(pct).toFixed(1)}%</span> 較上月`
+        ? `<span class="mom-chip ${dir}">${arrow} ${Math.abs(pct).toFixed(1)}%</span> 較上月同期`
         : '上月無資料可比較';
   } else {
     document.getElementById('momSub').textContent = '本月尚無訂單資料';
@@ -1409,11 +1520,14 @@ function render(shipments, orders, isAggregate){
     monthMap[i.monthKey] = (monthMap[i.monthKey] || 0) + i.amount;
   });
   const monthKeys = Object.keys(monthMap).sort(); // 由舊到新
+  const curKey = `${curY}-${String(curM+1).padStart(2,'0')}`;
   const trendListEl = document.getElementById('trendList');
   document.getElementById('trendMonthCount').textContent = monthKeys.length + ' 個月';
 
   if(monthKeys.length === 0){
     trendListEl.innerHTML = '<div class="empty">找不到可辨識的訂單日期，暫無法統計月度走勢</div>';
+    document.getElementById('trendToggleBtn').style.display = 'none';
+    trendExpanded = false;
   } else {
     const maxAmount = Math.max(...monthKeys.map(k => monthMap[k]));
 
@@ -1425,7 +1539,7 @@ function render(shipments, orders, isAggregate){
       const prevIdx = monthKeys.indexOf(key) - 1;
       let changeHtml = '<span class="t-change flat">—</span>';
       if(prevIdx >= 0){
-        const prevAmt = monthMap[monthKeys[prevIdx]];
+        const prevAmt = key === curKey ? prevMonthTotal : monthMap[monthKeys[prevIdx]]; // 本月至今對上月同期
         const d = amt - prevAmt;
         const p = prevAmt !== 0 ? (d/prevAmt*100) : 0;
         const dir = d > 0 ? 'up' : (d < 0 ? 'down' : 'flat');
@@ -1437,15 +1551,15 @@ function render(shipments, orders, isAggregate){
       const yoyKey = `${parseInt(yy,10)-1}-${mm}`;
       let yoyHtmlRow = '';
       if(monthMap[yoyKey] !== undefined){
-        const lyAmt = monthMap[yoyKey];
+        const lyAmt = key === curKey ? lyMonthTotal : monthMap[yoyKey]; // 本月至今對去年同期
         const d2 = amt - lyAmt;
         const p2 = lyAmt !== 0 ? (d2/lyAmt*100) : 0;
         const dir2 = d2 > 0 ? 'up' : (d2 < 0 ? 'down' : 'flat');
         const arrow2 = d2 > 0 ? '▲' : (d2 < 0 ? '▼' : '—');
-        yoyHtmlRow = `<span class="t-yoy ${dir2}">去年同月 ${arrow2}${Math.abs(p2).toFixed(0)}%</span>`;
+        yoyHtmlRow = `<span class="t-yoy ${dir2}">${key === curKey ? '去年同期' : '去年同月'} ${arrow2}${Math.abs(p2).toFixed(0)}%</span>`;
       }
       return `
-        <div class="trend-row ${idx===0 ? 'is-current' : ''} ${idx>=6 ? 'trend-extra' : ''}" ${idx>=6 ? 'style="display:none;"' : ''}>
+        <div class="trend-row ${key===curKey ? 'is-current' : ''} ${idx>=6 ? 'trend-extra' : ''}" ${idx>=6 ? 'style="display:none;"' : ''}>
           <div class="t-month">${monthLabel(key)}</div>
           <div class="t-bar-track"><div class="t-bar-fill" style="width:${barPct}%"></div></div>
           <div class="t-amount">${fmtInt(amt)} đ</div>
@@ -1504,8 +1618,8 @@ function render(shipments, orders, isAggregate){
     if(!pm.code && code) pm.code = code; // 補上第一次沒抓到、但後面出現的代碼
     return pm;
   };
-  const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7); sevenDaysAgo.setHours(0,0,0,0);
-  const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-30); thirtyDaysAgo.setHours(0,0,0,0);
+  const sevenDaysAgo = new Date(today); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-6); sevenDaysAgo.setHours(0,0,0,0);
+  const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate()-29); thirtyDaysAgo.setHours(0,0,0,0);
   // 用量／全期月均／近7天／近30天／目前單價：全部以「實際出貨」計算
   withDate.forEach(i => {
     const pm = getPM(i.code, i.name, i.customerLabel);
@@ -1523,9 +1637,9 @@ function render(shipments, orders, isAggregate){
     if(iY===curY && iQ===curQ) pm.quarterQty += i.qty;
     if(iY===curY) pm.yearQty += i.qty;
     // 去年同期，用來算日曆制那邊的年增/年減
-    if(iY===curY-1 && iM===curM) pm.lyMonthQty += i.qty;
-    if(iY===curY-1 && iQ===curQ) pm.lyQuarterQty += i.qty;
-    if(iY===curY-1) pm.lyYearQty += i.qty;
+    if(iY===curY-1 && iM===curM && i.dateObj<=lyCutoff) pm.lyMonthQty += i.qty;
+    if(iY===curY-1 && iQ===curQ && i.dateObj<=lyCutoff) pm.lyQuarterQty += i.qty;
+    if(iY===curY-1 && i.dateObj<=lyCutoff) pm.lyYearQty += i.qty;
     // 上個月（跟去年同月比較）
     if(iY===pmY && iM===pmM) pm.lastMonthQty += i.qty;
     if(iY===pmY-1 && iM===pmM) pm.lyLastMonthQty += i.qty;
@@ -1576,8 +1690,8 @@ function render(shipments, orders, isAggregate){
       const a = rawProducts[i], b = rawProducts[j];
       // 兩邊是否曾經是同一個客戶：代碼是客戶內部編號，只有「同一客戶」內代碼相符才有意義；
       // 不同客戶剛好用了同一個代碼純屬巧合，不能拿來當作「是同一產品」的證據
-      const sameCustomer = a.customerLabels && b.customerLabels &&
-        Array.from(a.customerLabels).some(l => b.customerLabels.has(l));
+      let sameCustomer = false;
+      for(const l of a.customerLabels){ if(b.customerLabels.has(l)){ sameCustomer = true; break; } }
       if(sameCustomer && a.code && b.code && a.code === b.code) continue; // 同客戶內代碼都有填且完全相同才跳過；兩邊代碼都空白時不能算「相同」，要繼續往下比對品名
       const nameMatch = normName(a.name) === normName(b.name) && normName(a.name) !== '';
       const codeMatch = sameCustomer && a.code && b.code && a.code.toUpperCase() === b.code.toUpperCase(); // 完全相符（僅忽略大小寫），非相似度比對；且僅同客戶內採信
@@ -1588,7 +1702,7 @@ function render(shipments, orders, isAggregate){
       const missingCodeOnOneSide = !a.code || !b.code;
       // matchCount>=2 這條路徑一定要限制同客戶：nameMatch／priceMatch 本身都沒有限制客戶，
       // 若不加 sameCustomer，兩個不同客戶剛好品名+單價相同（染料業很常見公版價格）就會被誤合併成同一產品
-      if((matchCount >= 2 && sameCustomer) || (missingCodeOnOneSide && nameMatch)) union(i, j);
+      if((matchCount >= 2 && sameCustomer) || (missingCodeOnOneSide && nameMatch && sameCustomer)) union(i, j); // 品名相同但缺代碼的合併，也限制在同一客戶內，避免通用品名跨客戶誤併
     }
   }
 
@@ -1710,7 +1824,8 @@ function render(shipments, orders, isAggregate){
     watchlistEl.innerHTML = '';
   } else {
     products.forEach(p => {
-      p.monthCount = Math.max(p.months.size, 1);
+      // 月均＝總量 ÷ 首次到最後一次出貨之間的月數（原本只除以「有出貨的月份數」，不規律的產品月均會偏高）
+      p.monthCount = Math.max((p.lastDate.getFullYear()*12 + p.lastDate.getMonth()) - (p.firstDate.getFullYear()*12 + p.firstDate.getMonth()) + 1, 1);
       p.fullAvg = p.totalQty / p.monthCount;
       p.expected7d = p.fullAvg * (7/30);
       p.expected30d = p.fullAvg;
@@ -1894,7 +2009,7 @@ function render(shipments, orders, isAggregate){
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
-                  <div class="w-code">${escapeHtml(p.code)} · 單價 ${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'} · 全期月均 ${fmtInt(p.fullAvg)}</div>
+                  <div class="w-code">${escapeHtml(p.code)} · 單價 ${p.latestPrice ? fmtPrice(p.latestPrice) + ' đ' : '—'} · 全期月均 ${fmtInt(p.fullAvg)}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:10px;">
                   <div class="w-tag" style="color:var(--ink-dim);">已 ${p.daysSinceLastOrder} 天沒下單 · ${p.daysSinceLastShip} 天沒出貨</div>
@@ -1923,7 +2038,7 @@ function render(shipments, orders, isAggregate){
           ${visibleMergeLog.map(({from, into}, idx) => `
               <div class="watch-row">
                 <div>
-                  <div class="w-name">${escapeHtml(from.code)}（${fmtInt(from.totalQty)}） <span style="color:var(--ink-dim);">已併入</span> ${escapeHtml(into.code)}（${fmtInt(into.totalQty)}）</div>
+                  <div class="w-name">${escapeHtml(from.code || from.name)}（${fmtInt(from.totalQty)}） <span style="color:var(--ink-dim);">已併入</span> ${escapeHtml(into.code || into.name)}（${fmtInt(into.totalQty)}）</div>
                   <div class="w-code">${escapeHtml(into.name || into.code)}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:10px;">
@@ -1953,7 +2068,7 @@ function render(shipments, orders, isAggregate){
               <div class="watch-row">
                 <div>
                   <div class="w-name">${escapeHtml(p.name || p.code)}</div>
-                  <div class="w-code">${escapeHtml(p.code)} · ${fmtInt(p.prevPrice)} đ → ${fmtInt(p.latestPrice)} đ（${fmtDateShort(p.priceChangeDate)}）</div>
+                  <div class="w-code">${escapeHtml(p.code)} · ${fmtPrice(p.prevPrice)} đ → ${fmtPrice(p.latestPrice)} đ（${fmtDateShort(p.priceChangeDate)}）</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:10px;">
                   <div class="w-tag" style="color:var(--brass);">${p.priceChangePct > 0 ? '▲' : '▼'} ${Math.abs(p.priceChangePct).toFixed(0)}%</div>
@@ -1998,7 +2113,7 @@ function render(shipments, orders, isAggregate){
             <div class="s-name">${escapeHtml(p.name || p.code)}</div>
             <div class="s-code">${escapeHtml(p.code)}</div>
           </div>
-          <div class="s-num"><span class="s-num-label">單價</span>${p.latestPrice ? fmtInt(p.latestPrice) + ' đ' : '—'}</div>
+          <div class="s-num"><span class="s-num-label">單價</span>${p.latestPrice ? fmtPrice(p.latestPrice) + ' đ' : '—'}</div>
           <div class="s-num qty-calendar"><span class="s-num-label">上月</span>${fmtInt(p.lastMonthQty)}<span class="s-trend-mini ${p.tLastMonth.dir}">${p.tLastMonth.arrow}</span></div>
           <div class="s-num qty-calendar"><span class="s-num-label">本月</span>${fmtInt(p.monthQty)}<span class="s-trend-mini ${p.tMonth.dir}">${p.tMonth.arrow}</span></div>
           <div class="s-num qty-calendar"><span class="s-num-label">本季</span>${fmtInt(p.quarterQty)}<span class="s-trend-mini ${p.tQuarter.dir}">${p.tQuarter.arrow}</span></div>
